@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>MiniApp</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+</head>
+<body class="bg-light">
+
+<nav class="navbar navbar-dark bg-dark mb-4">
+    <div class="container">
+        <span class="navbar-brand">🏋️ MiniApp</span>
+        <a href="/logout" class="btn btn-outline-light btn-sm">Выйти</a>
+    </div>
+</nav>
+
+<div class="container">
+    <div class="row">
+
+        <!-- ТРЕНИРОВКИ -->
+        <div class="col-md-6">
+            <div class="card shadow-sm mb-4">
+                <div class="card-header bg-success text-white">
+                    <h5 class="mb-0">💪 Тренировки</h5>
+                </div>
+                <div class="card-body">
+                    <button class="btn btn-success mb-3" onclick="loadWorkouts()">
+                        Загрузить
+                    </button>
+                    <div id="workouts"></div>
+
+                    <hr>
+                    <h6>Добавить тренировку</h6>
+                    <input id="pushUps" type="number" class="form-control mb-2" placeholder="Отжимания">
+                    <input id="squats" type="number" class="form-control mb-2" placeholder="Приседания">
+                    <input id="hours" type="number" step="0.1" class="form-control mb-2" placeholder="Время (ч.)">
+                    <button class="btn btn-outline-success" onclick="addWorkout()">Добавить</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- УЧЁБА -->
+        <div class="col-md-6">
+            <div class="card shadow-sm mb-4">
+                <div class="card-header bg-primary text-white">
+                    <h5 class="mb-0">📚 Учёба</h5>
+                </div>
+                <div class="card-body">
+                    <button class="btn btn-primary mb-3" onclick="loadStudies()">
+                        Загрузить
+                    </button>
+                    <div id="studies"></div>
+
+                    <hr>
+                    <h6>Добавить учёбу</h6>
+                    <input id="javaHours" type="number" step="0.1" class="form-control mb-2" placeholder="Java часы">
+                    <input id="englishHours" type="number" step="0.1" class="form-control mb-2" placeholder="English часы">
+                    <button class="btn btn-outline-primary" onclick="addStudy()">Добавить</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- АНАЛИТИКА -->
+        <div class="col-md-12">
+            <div class="card shadow-sm mb-4">
+                <div class="card-header bg-warning">
+                    <h5 class="mb-0">📊 Аналитика</h5>
+                </div>
+                <div class="card-body">
+                    <button class="btn btn-warning mb-3" onclick="loadAnalytics()">
+                        Загрузить
+                    </button>
+                    <div id="analytics"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ЦЕЛИ -->
+        <div class="col-md-12">
+            <div class="card shadow-sm mb-4">
+                <div class="card-header bg-danger text-white">
+                    <h5 class="mb-0">🎯 Цели</h5>
+                </div>
+                <div class="card-body">
+                    <button class="btn btn-danger mb-3" onclick="loadGoals()">
+                        Загрузить
+                    </button>
+                    <div id="goals"></div>
+
+                    <hr>
+                    <h6>Добавить цель</h6>
+                    <select id="goalType" class="form-select mb-2">
+                        <option value="PUSHUPS">Отжимания</option>
+                        <option value="SQUATS">Приседания</option>
+                        <option value="JAVA">Java часы</option>
+                        <option value="ENGLISH">English часы</option>
+                    </select>
+                    <input id="goalTarget" type="number" class="form-control mb-2" placeholder="Цель (например 1000)">
+                    <button class="btn btn-outline-danger" onclick="addGoal()">Добавить цель</button>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    let LOGIN = "";
+
+    fetch("/api/workouts/me")
+        .then(r => r.text())
+        .then(login => {
+            LOGIN = login;
+            loadWorkouts();
+            loadStudies();
+            loadAnalytics();
+        });
+
+    function loadWorkouts() {
+        fetch(`/api/workouts/${LOGIN}`)
+            .then(r => r.json())
+            .then(data => {
+                const div = document.getElementById("workouts");
+                div.innerHTML = data.map(w => `
+                    <div class="alert alert-success">
+                        <b>Отжимания:</b> ${w.pushUps} раз |
+                        <b>Приседания:</b> ${w.squats} раз |
+                        <b>Время:</b> ${w.hours} ч.
+                    </div>
+                `).join("");
+            });
+    }
+
+    function loadStudies() {
+        fetch(`/api/studies/${LOGIN}`)
+            .then(r => r.json())
+            .then(data => {
+                const div = document.getElementById("studies");
+                div.innerHTML = data.map(s => `
+                    <div class="alert alert-primary">
+                        <b>Java:</b> ${s.javaHours} ч. |
+                        <b>English:</b> ${s.englishHours} ч. |
+                        <b>Всего:</b> ${s.hours} ч.
+                    </div>
+                `).join("");
+            });
+    }
+
+    function loadAnalytics() {
+        fetch(`/api/analytics/${LOGIN}`)
+            .then(r => r.json())
+            .then(data => {
+                const div = document.getElementById("analytics");
+                div.innerHTML = `
+                    <div class="row">
+                        <div class="col-md-4">
+                            <div class="card text-center border-success mb-3">
+                                <div class="card-body">
+                                    <h3>${data.totalPushUps}</h3>
+                                    <p>Всего отжиманий</p>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-md-4">
+                            <div class="card text-center border-success mb-3">
+                                <div class="card-body">
+                                    <h3>${data.totalSquats}</h3>
+                                    <p>Всего приседаний</p>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-md-4">
+                            <div class="card text-center border-success mb-3">
+                                <div class="card-body">
+                                    <h3>${data.totalWorkoutHours} ч.</h3>
+                                    <p>Время тренировок</p>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-md-4">
+                            <div class="card text-center border-primary mb-3">
+                                <div class="card-body">
+                                    <h3>${data.totalJavaHours} ч.</h3>
+                                    <p>Время Java</p>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-md-4">
+                            <div class="card text-center border-primary mb-3">
+                                <div class="card-body">
+                                    <h3>${data.totalEnglishHours} ч.</h3>
+                                    <p>Время English</p>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-md-4">
+                            <div class="card text-center border-primary mb-3">
+                                <div class="card-body">
+                                    <h3>${data.totalStudyHours} ч.</h3>
+                                    <p>Общее время учёбы</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            });
+
+
+    }
+
+    function addWorkout() {
+        const pushUps = parseInt(document.getElementById("pushUps").value) || 0;
+        const squats = parseInt(document.getElementById("squats").value) || 0;
+        const hours = parseFloat(document.getElementById("hours").value);
+
+        // обязательно только время
+        if (!hours) {
+            alert("Введите время тренировки!");
+            return;
+        }
+
+        // хотя бы одно упражнение
+        if (!pushUps && !squats) {
+            alert("Введите хотя бы отжимания или приседания!");
+            return;
+        }
+
+        fetch(`/api/workouts/${LOGIN}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ pushUps, squats, hours, name: LOGIN })
+        })
+            .then(r => r.text())
+            .then(msg => {
+                alert(msg);
+                document.getElementById("pushUps").value = "";
+                document.getElementById("squats").value = "";
+                document.getElementById("hours").value = "";
+                loadWorkouts();
+            });
+    }
+
+    function addStudy() {
+        const javaHours = parseFloat(document.getElementById("javaHours").value);
+        const englishHours = parseFloat(document.getElementById("englishHours").value);
+
+        if (!javaHours && !englishHours) {
+            alert("Заполните хотя бы одно поле!");
+            return;
+        }
+
+        const hours = (javaHours || 0) + (englishHours || 0);
+
+        fetch(`/api/studies/${LOGIN}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ javaHours: javaHours || 0, englishHours: englishHours || 0, hours, name: LOGIN })
+        })
+            .then(r => r.text())
+            .then(msg => {
+                alert(msg);
+                document.getElementById("javaHours").value = "";
+                document.getElementById("englishHours").value = "";
+                loadStudies();
+            });
+    }
+
+    function loadGoals() {
+        fetch(`/api/goals/${LOGIN}`)
+            .then(r => r.json())
+            .then(data => {
+                const div = document.getElementById("goals");
+                div.innerHTML = data.map(g => `
+                    <div class="mb-3">
+                        <div class="d-flex justify-content-between">
+                            <span><b>${g.type}</b>: ${g.current} / ${g.target}</span>
+                            <span>${g.percent}%</span>
+                        </div>
+                        <div class="progress">
+                            <div class="progress-bar bg-danger" style="width: ${g.percent}%"></div>
+                        </div>
+                    </div>
+                `).join("");
+            });
+    }
+
+    function addGoal() {
+        const type = document.getElementById("goalType").value;
+        const target = parseFloat(document.getElementById("goalTarget").value);
+
+        if (!target) {
+            alert("Введите цель!");
+            return;
+        }
+
+        fetch(`/api/goals/${LOGIN}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ type, target })
+        })
+            .then(r => r.text())
+            .then(msg => {
+                alert(msg);
+                document.getElementById("goalTarget").value = "";
+                loadGoals();
+            });
+    }
+</script>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>

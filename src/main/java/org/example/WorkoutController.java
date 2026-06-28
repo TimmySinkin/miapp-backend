@@ -29,6 +29,6 @@ public class WorkoutController {
     }
     @GetMapping("/me")
     public String getCurrentLogin(java.security.Principal principal) {
-        return principal.getName();
+    return principal.getName();
     }
 }

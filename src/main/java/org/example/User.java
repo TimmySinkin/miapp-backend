@@ -9,6 +9,7 @@ public class User {
     private String login;
     private String password;
     private String name;
+    private String email;
     private LocalDate createdAt;
     private List<DailyRecord> history;
 
@@ -20,8 +21,14 @@ public class User {
         this.history = new ArrayList<>();
     }
 
+    public User(String login, String password, String name, String email) {
+        this(login, password, name);
+        this.email = email;
+    }
+
     public String getLogin() { return login; }
     public String getName() { return name; }
+    public String getEmail() { return email; }
     public LocalDate getCreatedAt() { return createdAt; }
     public String getPassword() { return password; }
 
@@ -32,6 +39,7 @@ public class User {
     public void setLogin(String login) { this.login = login; }
     public void setPassword(String password) { this.password = password; }
     public void setName(String name) { this.name = name; }
+    public void setEmail(String email) { this.email = email; }
 
     public void clearHistory() { this.history.clear(); }
     public void addRecord(DailyRecord record) { this.history.add(record); }

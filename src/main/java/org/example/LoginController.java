@@ -1,6 +1,8 @@
 package org.example;
 
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.ResponseEntity;
+import org.springframework.http.HttpStatus;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.web.bind.annotation.*;
 
@@ -11,25 +13,21 @@ public class LoginController {
     @Autowired
     private DatabaseService db;
 
-    private final BCryptPasswordEncoder encoder =
-            new BCryptPasswordEncoder();
+    private final BCryptPasswordEncoder encoder = new BCryptPasswordEncoder();
 
     @PostMapping("/login")
-    public String login(@RequestBody LoginRequest request) {
+    public ResponseEntity<String> login(@RequestBody LoginRequest request) {
 
         User user = db.loadUserByLogin(request.getLogin());
 
         if (user == null) {
-            return "Пользователь не найден";
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body("Пользователь не найден");
         }
 
-        if (!encoder.matches(
-                request.getPassword(),
-                user.getPassword())) {
-
-            return "Неверный пароль";
+        if (!encoder.matches(request.getPassword(), user.getPassword())) {
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body("Неверный пароль");
         }
 
-        return "Вход выполнен";
+        return ResponseEntity.ok("Вход выполнен");
     }
 }

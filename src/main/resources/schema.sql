@@ -1,9 +1,9 @@
 CREATE TABLE IF NOT EXISTS users (
     login TEXT PRIMARY KEY,
     password TEXT,
-    name TEXT
+    name TEXT,
+    email TEXT UNIQUE
 );
-
 CREATE TABLE IF NOT EXISTS workouts (
     id SERIAL PRIMARY KEY,
     date TEXT,
@@ -29,4 +29,14 @@ CREATE TABLE IF NOT EXISTS goals (
     login TEXT,
     type TEXT,
     target REAL
+);
+
+CREATE TABLE IF NOT EXISTS day_tasks (
+    id SERIAL PRIMARY KEY,
+    login TEXT,
+    date TEXT,
+    text TEXT,
+    goal_count REAL,
+    progress REAL,
+    position INTEGER
 );

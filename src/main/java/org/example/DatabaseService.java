@@ -112,12 +112,12 @@ public class DatabaseService {
     }
 
     public void saveUser(User user) {
-        jdbc.update(
-            "INSERT INTO users (login, password, name) VALUES (?, ?, ?) " +
-            "ON CONFLICT (login) DO UPDATE SET password = EXCLUDED.password, name = EXCLUDED.name",
-            user.getLogin(), user.getPassword(), user.getName()
-        );
-        System.out.println("Пользователь сохранён!");
+    jdbc.update(
+        "INSERT INTO users (login, password, name, email) VALUES (?, ?, ?, ?) " +
+        "ON CONFLICT (login) DO UPDATE SET password = EXCLUDED.password, name = EXCLUDED.name, email = EXCLUDED.email",
+        user.getLogin(), user.getPassword(), user.getName(), user.getEmail()
+    );
+    System.out.println("Пользователь сохранён!");
     }
 
     public User loadUserByLogin(String login) {
@@ -126,9 +126,24 @@ public class DatabaseService {
             (rs, rowNum) -> new User(
                 rs.getString("login"),
                 rs.getString("password"),
-                rs.getString("name")
+                rs.getString("name"),
+                rs.getString("email")
             ),
             login
+        );
+        return users.isEmpty() ? null : users.get(0);
+    }
+    
+    public User loadUserByEmail(String email) {
+        List<User> users = jdbc.query(
+            "SELECT * FROM users WHERE email = ?",
+            (rs, rowNum) -> new User(
+                rs.getString("login"),
+                rs.getString("password"),
+                rs.getString("name"),
+                rs.getString("email")
+            ),
+            email
         );
         return users.isEmpty() ? null : users.get(0);
     }

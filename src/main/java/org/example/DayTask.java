@@ -8,10 +8,12 @@ public class DayTask {
     private Double goalCount;
     private Double progress;
     private Integer position;
+    private String category;
+    private String chatId; // NULL для задач, добавленных вручную; иначе id чата AI-агента, из плана которого пришла задача
 
     public DayTask() {}
 
-    public DayTask(Long id, String login, String date, String text, Double goalCount, Double progress, Integer position) {
+    public DayTask(Long id, String login, String date, String text, Double goalCount, Double progress, Integer position, String category, String chatId) {
         this.id = id;
         this.login = login;
         this.date = date;
@@ -19,6 +21,8 @@ public class DayTask {
         this.goalCount = goalCount;
         this.progress = progress;
         this.position = position;
+        this.category = category;
+        this.chatId = chatId;
     }
 
     public Long getId() { return id; }
@@ -35,4 +39,8 @@ public class DayTask {
     public void setProgress(Double progress) { this.progress = progress; }
     public Integer getPosition() { return position; }
     public void setPosition(Integer position) { this.position = position; }
+    public String getCategory() { return category; }
+    public void setCategory(String category) { this.category = category; }
+    public String getChatId() { return chatId; }
+    public void setChatId(String chatId) { this.chatId = chatId; }
 }

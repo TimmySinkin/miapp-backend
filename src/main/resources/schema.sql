@@ -40,3 +40,67 @@ CREATE TABLE IF NOT EXISTS day_tasks (
     progress REAL,
     position INTEGER
 );
+
+-- Чаты ИИ-агента. id — тот же UUID, что фронт генерирует через crypto.randomUUID(),
+-- чтобы не переделывать логику на фронте под числовые id.
+CREATE TABLE IF NOT EXISTS ai_chats (
+    id              TEXT PRIMARY KEY,
+    login           TEXT NOT NULL REFERENCES users(login) ON DELETE CASCADE,
+    title           TEXT NOT NULL,
+    goal_text       TEXT,              -- полный (не обрезанный) текст первой цели — нужен для парсинга срока плана
+    icon            TEXT,              -- эмодзи категории
+    icon_tint       TEXT,              -- цвет фона бейджа
+    icon_fg         TEXT,              -- цвет иконки/текста бейджа
+    favorite        BOOLEAN NOT NULL DEFAULT FALSE,
+    plan_total_days INTEGER,           -- NULL, если план ещё не принят
+    plan_start_date TEXT,              -- дата принятия плана (YYYY-MM-DD)
+    plan_progress   INTEGER DEFAULT 0, -- ручной прогресс 0-100, выставленный слайдером
+    created_at      TIMESTAMP NOT NULL DEFAULT now()
+);
+ 
+CREATE INDEX IF NOT EXISTS idx_ai_chats_login ON ai_chats(login);
+ 
+-- Сообщения внутри чата. Вложения храним как JSON-текст (упрощённо —
+-- без хранения самих файлов в БД, только метаданные + текстовое содержимое).
+CREATE TABLE IF NOT EXISTS ai_messages (
+    id              SERIAL PRIMARY KEY,
+    chat_id         TEXT NOT NULL REFERENCES ai_chats(id) ON DELETE CASCADE,
+    role            TEXT NOT NULL,     -- 'user' | 'bot'
+    text            TEXT,
+    attachments_json TEXT,             -- JSON-массив вложений (может быть NULL)
+    created_at      TIMESTAMP NOT NULL DEFAULT now()
+);
+ 
+CREATE INDEX IF NOT EXISTS idx_ai_messages_chat_id ON ai_messages(chat_id);
+
+ALTER TABLE users ADD COLUMN IF NOT EXISTS google_id TEXT UNIQUE;
+
+-- Верификация почты при обычной регистрации (не через Google):
+-- verified=FALSE, пока пользователь не введёт код с почты. Логин заблокирован
+-- для неверифицированных (см. LoginController). Код и срок годности храним
+-- прямо на строке пользователя — проще, чем отдельная таблица, т.к. активна
+-- только ОДНА попытка регистрации на login/email одновременно.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS verified BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS verification_code TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS verification_expires TIMESTAMP;
+
+-- "Забыли пароль": отдельные колонки от verification_code/expires выше,
+-- чтобы код регистрации и код сброса пароля не смешивались, если оба
+-- процесса случайно пересекутся по времени у одного пользователя.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_code TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_expires TIMESTAMP;
+-- Google-аккаунты приходят уже "подтверждённой" почтой от Google — не гоняем
+-- их через этот же процесс. У существующих пользователей (до этой миграции)
+-- DEFAULT TRUE не трогает их доступ.
+
+ALTER TABLE day_tasks ADD COLUMN IF NOT EXISTS chat_id TEXT REFERENCES ai_chats(id) ON DELETE SET NULL;
+
+DELETE FROM users;
+DELETE FROM day_tasks;
+DELETE FROM goals;
+DELETE FROM studies;
+DELETE FROM workouts;
+DELETE FROM ai_messages;  -- на случай если хотите явно, хотя каскад и так их снесёт
+DELETE FROM ai_chats;
+DELETE FROM users;
+TRUNCATE TABLE users, ai_chats, ai_messages, workouts, studies, goals, day_tasks RESTART IDENTITY CASCADE;

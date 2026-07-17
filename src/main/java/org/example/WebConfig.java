@@ -18,7 +18,10 @@ public class WebConfig implements WebMvcConfigurer {
     @Override
     public void addCorsMappings(CorsRegistry registry) {
         registry.addMapping("/api/**")
-                .allowedOrigins("http://localhost:5173") // адрес вашего фронтенда (Vite/CRA — поправьте порт при необходимости)
+                .allowedOrigins(
+                    "http://localhost:5173", // адрес вашего фронтенда (Vite/CRA — поправьте порт при необходимости)
+                    "https://icy-lemons-pay.loca.lt" // временный туннель для тестирования Telegram-логина — адрес меняется при каждом перезапуске localtunnel, обновляйте здесь
+                )
                 .allowedMethods("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")
                 .allowedHeaders("*")
                 .allowCredentials(true);

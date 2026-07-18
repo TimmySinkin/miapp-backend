@@ -20,7 +20,9 @@ public class WebConfig implements WebMvcConfigurer {
         registry.addMapping("/api/**")
                 .allowedOrigins(
                     "http://localhost:5173", // локальная разработка
-                    "https://miniapp-frontend-xi.vercel.app" // прод-домен на Vercel
+                    "https://miniapp-frontend-xi.vercel.app", // прод-домен на Vercel (поддомен)
+                    "https://caltrack.ru", // ваш купленный домен
+                    "https://www.caltrack.ru" // и его www-версия (на неё идёт редирект с голого домена)
                 )
                 .allowedMethods("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")
                 .allowedHeaders("*")

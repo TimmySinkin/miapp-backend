@@ -81,6 +81,14 @@ public class TelegramAuthController {
             StringBuilder hex = new StringBuilder();
             for (byte b : computed) hex.append(String.format("%02x", b));
 
+            // ВРЕМЕННО для диагностики — удалить после починки.
+            System.out.println("TG DEBUG botToken (первые 6 симв.): " +
+                (botToken != null ? botToken.substring(0, Math.min(6, botToken.length())) : "NULL") +
+                ", длина=" + (botToken != null ? botToken.length() : 0));
+            System.out.println("TG DEBUG checkString: [" + checkString + "]");
+            System.out.println("TG DEBUG computed hash: " + hex);
+            System.out.println("TG DEBUG received hash: " + hash);
+
             if (!hex.toString().equals(hash)) {
                 throw new IllegalArgumentException("Неверная подпись Telegram — данные могли быть подделаны");
             }

@@ -1,13 +1,5 @@
 package org.example;
 
-import jakarta.servlet.http.HttpServletResponse;
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.http.ResponseEntity;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.web.bind.annotation.*;
-
-import javax.crypto.Mac;
-import javax.crypto.spec.SecretKeySpec;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -15,6 +7,19 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
+
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
+
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.ResponseEntity;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+import jakarta.servlet.http.HttpServletResponse;
 
 /**
  * Вход через Telegram Login Widget. Виджет на фронте сам получает подпись от
@@ -35,6 +40,13 @@ public class TelegramAuthController {
 
     private static final long MAX_AUTH_AGE_SECONDS = 24 * 60 * 60;
 
+    // Telegram подписывает ТОЛЬКО эти поля. Любое постороннее поле в теле
+    // запроса (например rememberMe, добавленное фронтом в тот же объект)
+    // не должно попадать в check-string, иначе hash никогда не совпадёт.
+    private static final java.util.Set<String> TELEGRAM_FIELDS = java.util.Set.of(
+        "id", "first_name", "last_name", "username", "photo_url", "auth_date"
+    );
+
     public TelegramAuthController(JdbcTemplate jdbc, JwtUtil jwtUtil) {
         this.jdbc = jdbc;
         this.jwtUtil = jwtUtil;
@@ -46,8 +58,12 @@ public class TelegramAuthController {
             throw new IllegalArgumentException("Отсутствует подпись Telegram");
         }
 
-        TreeMap<String, String> sorted = new TreeMap<>(data);
-        sorted.remove("hash");
+        TreeMap<String, String> sorted = new TreeMap<>();
+        for (Map.Entry<String, String> entry : data.entrySet()) {
+            if (TELEGRAM_FIELDS.contains(entry.getKey())) {
+                sorted.put(entry.getKey(), entry.getValue());
+            }
+        }
         StringBuilder checkString = new StringBuilder();
         for (Map.Entry<String, String> entry : sorted.entrySet()) {
             if (checkString.length() > 0) checkString.append('\n');

@@ -95,12 +95,4 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_expires TIMESTAMP;
 
 ALTER TABLE day_tasks ADD COLUMN IF NOT EXISTS chat_id TEXT REFERENCES ai_chats(id) ON DELETE SET NULL;
 
-DELETE FROM users;
-DELETE FROM day_tasks;
-DELETE FROM goals;
-DELETE FROM studies;
-DELETE FROM workouts;
-DELETE FROM ai_messages;  -- на случай если хотите явно, хотя каскад и так их снесёт
-DELETE FROM ai_chats;
-DELETE FROM users;
-TRUNCATE TABLE users, ai_chats, ai_messages, workouts, studies, goals, day_tasks RESTART IDENTITY CASCADE;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS telegram_id TEXT UNIQUE;

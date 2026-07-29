@@ -19,7 +19,7 @@ public class WebConfig implements WebMvcConfigurer {
     public void addCorsMappings(CorsRegistry registry) {
         registry.addMapping("/api/**")
                 .allowedOrigins(
-                    "http://localhost:5173", // локальная разработка
+                    "https://sad-animals-bake.loca.lt", // локальная разработка
                     "https://miniapp-frontend-xi.vercel.app", // прод-домен на Vercel (поддомен)
                     "https://caltrack.ru", // ваш купленный домен
                     "https://www.caltrack.ru" // и его www-версия (на неё идёт редирект с голого домена)

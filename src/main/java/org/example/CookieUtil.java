@@ -13,18 +13,22 @@ public class CookieUtil {
      * rememberMe = true  -> maxAge задан (30 дней) -> persistent cookie, переживает закрытие браузера.
      * rememberMe = false -> maxAge НЕ задаём (-1)   -> session cookie, удаляется браузером при закрытии.
      *
-     * sameSite=Lax и без Secure — подходит для локальной разработки по http://localhost.
-     * В проде (https) обязательно добавьте .secure(true) и рассмотрите sameSite=Strict/None
-     * в зависимости от того, с каким доменом фронтенд.
+     * SameSite=None + Secure — нужно, если фронтенд и бэкенд на разных сайтах
+     * с точки зрения браузера (например, фронт через туннель loca.lt/ngrok,
+     * бэкенд на localhost:8080 — для браузера это разные сайты, и SameSite=Lax
+     * такую куку кросс-доменно просто не отправит). Secure требует https у
+     * ОТВЕТА, который ставит куку — сам localhost браузеры считают
+     * "potentially trustworthy", поэтому Set-Cookie с Secure с обычного
+     * http://localhost:8080 всё равно принимается в Chrome/Firefox.
+     * Если разворачиваете на реальном проде — это в любом случае то, что
+     * нужно (Secure тогда обязателен по-настоящему, т.к. трафик реальный).
      */
     public static void setAuthCookie(HttpServletResponse response, String token, boolean rememberMe) {
         Cookie cookie = new Cookie(COOKIE_NAME, token);
         cookie.setHttpOnly(true);
         cookie.setPath("/");
-        // Secure нужно включить в проде под https, иначе браузер не примет
-        // sameSite=None; для localhost/http Lax работает без Secure.
-        cookie.setSecure(false);
-        cookie.setAttribute("SameSite", "Lax");
+        cookie.setSecure(true);
+        cookie.setAttribute("SameSite", "None");
         if (rememberMe) {
             cookie.setMaxAge((int) JwtUtil.REMEMBER_TTL.getSeconds());
         } else {

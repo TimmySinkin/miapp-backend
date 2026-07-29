@@ -1,51 +1,38 @@
 package org.example;
 
 import jakarta.servlet.http.HttpServletResponse;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.http.HttpEntity;
-import org.springframework.http.HttpHeaders;
-import org.springframework.http.HttpMethod;
 import org.springframework.http.ResponseEntity;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.web.bind.annotation.*;
-import org.springframework.web.client.RestTemplate;
 import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.util.List;
 import java.util.Map;
 
+/**
+ * Вход через Google. Сама проверка access_token у Google вынесена в
+ * GoogleAuthService — им же пользуется AccountLinkController при привязке
+ * Google к уже существующему аккаунту.
+ */
 @RestController
 @RequestMapping("/api/oauth")
 public class OAuthController {
 
-    @Autowired
-    private JdbcTemplate jdbc;
+    private final JdbcTemplate jdbc;
+    private final JwtUtil jwtUtil;
+    private final GoogleAuthService googleAuthService;
 
-    @Autowired
-    private JwtUtil jwtUtil;
-
-    private final RestTemplate restTemplate = new RestTemplate();
-    private final ObjectMapper mapper = new ObjectMapper();
+    public OAuthController(JdbcTemplate jdbc, JwtUtil jwtUtil, GoogleAuthService googleAuthService) {
+        this.jdbc = jdbc;
+        this.jwtUtil = jwtUtil;
+        this.googleAuthService = googleAuthService;
+    }
 
     // "accessToken" от Google — это OAuth-токен для похода в userinfo, а не
     // наш JWT сессии. rememberMe читаем как обычное текстовое поле "true"/"false",
     // т.к. body здесь Map<String,String>.
     private static boolean parseRememberMe(Map<String, String> body) {
         return "true".equalsIgnoreCase(body.get("rememberMe"));
-    }
-
-    // Проверяет access_token у самого Google (а не доверяет данным с фронта)
-    // и возвращает распарсенный профиль {sub, email, name, ...}.
-    private JsonNode verifyGoogleToken(String accessToken) throws Exception {
-        HttpHeaders headers = new HttpHeaders();
-        headers.set("Authorization", "Bearer " + accessToken);
-        HttpEntity<Void> entity = new HttpEntity<>(headers);
-        ResponseEntity<String> resp = restTemplate.exchange(
-            "https://www.googleapis.com/oauth2/v3/userinfo",
-            HttpMethod.GET, entity, String.class
-        );
-        return mapper.readTree(resp.getBody());
     }
 
     // Из имени/email пытаемся предложить приятный логин-заготовку —
@@ -75,7 +62,7 @@ public class OAuthController {
 
         JsonNode profile;
         try {
-            profile = verifyGoogleToken(accessToken);
+            profile = googleAuthService.verifyGoogleToken(accessToken);
         } catch (Exception e) {
             return ResponseEntity.status(401).body("Не удалось проверить токен Google: " + e.getMessage());
         }
@@ -146,7 +133,7 @@ public class OAuthController {
 
         JsonNode profile;
         try {
-            profile = verifyGoogleToken(accessToken);
+            profile = googleAuthService.verifyGoogleToken(accessToken);
         } catch (Exception e) {
             return ResponseEntity.status(401).body("Не удалось проверить токен Google: " + e.getMessage());
         }

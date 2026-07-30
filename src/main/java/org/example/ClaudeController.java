@@ -1,14 +1,23 @@
 package org.example;
 
-import org.springframework.http.*;
-import org.springframework.web.bind.annotation.*;
-import org.springframework.web.client.RestTemplate;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 import java.util.Locale;
+
+import org.springframework.http.HttpEntity;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpMethod;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.client.RestTemplate;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 
 @RestController
 @RequestMapping("/api/ai")
@@ -454,6 +463,11 @@ public class ClaudeController {
 
             return ResponseEntity.ok(reply);
         } catch (Exception e) {
+            // Раньше исключение просто проглатывалось — в консоли бэкенда было
+            // тихо даже при реальном 500. Теперь печатаем стек-трейс, иначе
+            // единственный источник информации об ошибке — обрезанный текст
+            // в теле ответа, который фронт вдобавок не всегда показывает.
+            e.printStackTrace();
             return ResponseEntity.status(500).body("Ошибка: " + e.getMessage());
         }
     }
@@ -481,6 +495,7 @@ public class ClaudeController {
 
             return ResponseEntity.ok(mapper.writeValueAsString(combined));
         } catch (Exception e) {
+            e.printStackTrace();
             return ResponseEntity.status(500).body("Ошибка: " + e.getMessage());
         }
     }

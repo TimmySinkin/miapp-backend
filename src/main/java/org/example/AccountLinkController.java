@@ -61,7 +61,7 @@ public class AccountLinkController {
             "(password IS NOT NULL) AS has_password, " +
             "(google_id IS NOT NULL) AS has_google, " +
             "(telegram_id IS NOT NULL) AS has_telegram, " +
-            "email, telegram_username " +
+            "email, telegram_username, avatar_url " +
             "FROM users WHERE login = ?",
             login
         );

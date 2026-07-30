@@ -23,28 +23,34 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 @RequestMapping("/api/ai")
 public class ClaudeController {
 
-    // По умолчанию RestTemplate() ждёт ответа БЕСКОНЕЧНО — если Ollama зависнет
-    // или будет генерировать слишком долго (например, огромный JSON-план),
-    // запрос повиснет навсегда без единой ошибки. Явно задаём таймауты:
-    // на подключение — 10 сек, на чтение (саму генерацию) — 5 минут, этого
-    // с запасом хватает на один "чанк" плана (см. generatePlanChunk).
+    // Таймаут по умолчанию у RestTemplate() — БЕСКОНЕЧНЫЙ. Явно задаём разумные
+    // границы: 10 сек на подключение, 2 минуты на чтение (Groq работает быстро,
+    // это далеко не Ollama, но запас на сеть/ретраи не помешает).
     private final RestTemplate restTemplate = buildRestTemplateWithTimeouts();
 
     private static RestTemplate buildRestTemplateWithTimeouts() {
         var factory = new org.springframework.http.client.SimpleClientHttpRequestFactory();
         factory.setConnectTimeout(10_000);
-        factory.setReadTimeout(5 * 60_000);
+        factory.setReadTimeout(2 * 60_000);
         return new RestTemplate(factory);
     }
     private final ObjectMapper mapper = new ObjectMapper();
 
+    // Groq — облачный API, доступный откуда угодно (в отличие от Ollama на
+    // localhost, которая недоступна бэкенду, задеплоенному на Render).
+    // Ключ берём из переменной окружения — задайте GROQ_API_KEY в настройках
+    // сервиса на Render (или локально через export GROQ_API_KEY=...).
+    // Получить ключ: https://console.groq.com/keys (бесплатно, без карты).
+    private static final String GROQ_API_KEY = System.getenv("GROQ_API_KEY");
+    private static final String GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
+
     // Модель вынесена отдельно — легко поменять в одном месте.
-    // qwen3:14b выбрана из-за наиболее надёжного tool calling среди
-    // локальных моделей, которые помещаются в 12 ГБ VRAM целиком.
-    private static final String MODEL_NAME = "qwen3:14b";
-    // Vision-модель для запросов с изображениями. Нужно предварительно
-    // скачать: ollama pull qwen2.5vl (или другую поддерживаемую vision-модель).
-    private static final String VISION_MODEL_NAME = "qwen2.5vl";
+    // qwen/qwen3-32b — бесплатный тариф Groq (1000 запросов/день, 6000 токенов/мин
+    // на момент написания), надёжный tool calling, крупнее прежней локальной 14b.
+    private static final String MODEL_NAME = "qwen/qwen3-32b";
+    // Vision-модель для запросов с изображениями — мультимодальная (preview на
+    // стороне Groq на момент написания, состав моделей может меняться).
+    private static final String VISION_MODEL_NAME = "qwen/qwen3.6-27b";
 
     private static final String CHAT_SYSTEM_PROMPT =
         "Ты — AI-ассистент в приложении-органайзере MiniApp. " +
@@ -289,10 +295,10 @@ public class ClaudeController {
         return tool;
     }
 
-    // Настоящий tool calling через Ollama /api/chat (в отличие от старого
-    // callOllama через /api/generate с плоской строкой промпта). Модель сама
-    // решает по ходу диалога, нужен ли ей web_search, и может вызвать его
-    // несколько раз подряд, прежде чем дать финальный текстовый ответ.
+    // Настоящий tool calling через Groq /chat/completions (OpenAI-совместимый
+    // формат) — раньше это был локальный Ollama /api/chat. Модель сама решает
+    // по ходу диалога, нужен ли ей web_search, и может вызвать его несколько
+    // раз подряд, прежде чем дать финальный текстовый ответ.
     private String callOllamaChatWithTools(
         String systemPrompt,
         String userMessage,
@@ -329,33 +335,30 @@ public class ClaudeController {
             ObjectNode body = mapper.createObjectNode();
             body.put("model", MODEL_NAME);
             body.put("stream", false);
-            // qwen3 — гибридная thinking-модель: без явного think=true она заметно
-            // хуже формирует структурированные tool_calls и вместо реального вызова
-            // инструмента начинает текстом рассуждать о том, что бы стоило поискать.
-            body.put("think", true);
+            body.put("temperature", 0.7);
+            // qwen3 на Groq: reasoning_effort "default" оставляет модели её
+            // обычное рассуждение перед ответом (важно для надёжного tool
+            // calling — без этого модель чаще просто текстом пересказывает,
+            // что стоило бы поискать, вместо реального вызова инструмента).
+            body.put("reasoning_effort", "default");
 
             com.fasterxml.jackson.databind.node.ArrayNode messagesArray = mapper.createArrayNode();
             for (ObjectNode m : messages) messagesArray.add(m);
             body.set("messages", messagesArray);
             if (toolsArray != null) body.set("tools", toolsArray);
 
-            ObjectNode options = mapper.createObjectNode();
-            options.put("temperature", 0.7);
-            body.set("options", options);
-
-            HttpHeaders headers = new HttpHeaders();
-            headers.setContentType(MediaType.APPLICATION_JSON);
-            HttpEntity<String> entity = new HttpEntity<>(body.toString(), headers);
+            HttpEntity<String> entity = new HttpEntity<>(body.toString(), groqHeaders());
 
             ResponseEntity<String> response = restTemplate.exchange(
-                "http://localhost:11434/api/chat",
+                GROQ_URL,
                 HttpMethod.POST,
                 entity,
                 String.class
             );
 
             JsonNode json = mapper.readTree(response.getBody());
-            JsonNode message = json.get("message");
+            JsonNode choices = json.get("choices");
+            JsonNode message = (choices != null && choices.size() > 0) ? choices.get(0).get("message") : null;
             JsonNode toolCalls = message != null ? message.get("tool_calls") : null;
 
             if (toolCalls != null && toolCalls.isArray() && toolCalls.size() > 0) {
@@ -363,33 +366,54 @@ public class ClaudeController {
                 // с tool_calls в историю и выполняем каждый вызов реально.
                 ObjectNode assistantMsg = mapper.createObjectNode();
                 assistantMsg.put("role", "assistant");
-                assistantMsg.put("content", message.has("content") ? message.get("content").asText("") : "");
+                assistantMsg.put("content", message.has("content") && !message.get("content").isNull()
+                    ? message.get("content").asText("") : "");
                 assistantMsg.set("tool_calls", toolCalls);
                 messages.add(assistantMsg);
 
                 for (JsonNode toolCall : toolCalls) {
                     JsonNode function = toolCall.get("function");
                     String name = function != null && function.has("name") ? function.get("name").asText("") : "";
+                    // В OpenAI-совместимом формате (в отличие от Ollama) каждый
+                    // tool_call имеет свой "id", и ответное сообщение ОБЯЗАНО
+                    // содержать tool_call_id с тем же значением — иначе Groq
+                    // не сможет сопоставить результат с вызовом.
+                    String toolCallId = toolCall.has("id") ? toolCall.get("id").asText("") : "";
+
                     String query = "";
                     JsonNode args = function != null ? function.get("arguments") : null;
-                    if (args != null && args.has("query")) {
-                        query = args.get("query").asText("");
+                    if (args != null) {
+                        // arguments у OpenAI-совместимых API — это JSON-СТРОКА,
+                        // а не готовый объект (в отличие от того, как отдавала
+                        // Ollama) — её нужно распарсить отдельно.
+                        if (args.isTextual()) {
+                            try {
+                                JsonNode parsedArgs = mapper.readTree(args.asText());
+                                if (parsedArgs.has("query")) query = parsedArgs.get("query").asText("");
+                            } catch (Exception ignored) {
+                                // если вдруг всё же пришёл не JSON — просто нет query
+                            }
+                        } else if (args.has("query")) {
+                            query = args.get("query").asText("");
+                        }
                     }
+
                     String result = "web_search".equals(name)
                         ? webSearch(query)
                         : "(неизвестный инструмент: " + name + ")";
 
                     ObjectNode toolMsg = mapper.createObjectNode();
                     toolMsg.put("role", "tool");
+                    toolMsg.put("tool_call_id", toolCallId);
                     toolMsg.put("content", result);
-                    toolMsg.put("tool_name", name);
                     messages.add(toolMsg);
                 }
                 continue; // следующая итерация — модель увидит результаты инструментов
             }
 
             // Нет вызовов инструментов — это финальный текстовый ответ
-            return message != null && message.has("content") ? message.get("content").asText("") : "";
+            return message != null && message.has("content") && !message.get("content").isNull()
+                ? message.get("content").asText("") : "";
         }
 
         return "Не удалось получить ответ после нескольких попыток вызова инструментов.";
@@ -656,6 +680,26 @@ public class ClaudeController {
         return Character.toUpperCase(s.charAt(0)) + s.substring(1);
     }
 
+    // Возвращает базовые заголовки с Bearer-токеном Groq — общие для всех
+    // запросов к их API.
+    private HttpHeaders groqHeaders() {
+        if (GROQ_API_KEY == null || GROQ_API_KEY.isBlank()) {
+            throw new IllegalStateException(
+                "GROQ_API_KEY не задан. Установите переменную окружения GROQ_API_KEY " +
+                "(ключ из https://console.groq.com/keys) на сервере, где запущен бэкенд.");
+        }
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        headers.set("Authorization", "Bearer " + GROQ_API_KEY);
+        return headers;
+    }
+
+    // Раньше это был вызов Ollama /api/generate (одна плоская строка prompt,
+    // без понятия "чат-сообщений"). Groq — полностью OpenAI-совместимый API,
+    // умеющий только chat completions, поэтому системный промпт и запрос
+    // пользователя собираются в messages: [{role:system}, {role:user}],
+    // а для изображений content становится массивом {type:text}/{type:image_url}
+    // вместо отдельного поля "images", как было у Ollama.
     private String callOllama(
         String systemPrompt,
         String userMessage,
@@ -667,58 +711,72 @@ public class ClaudeController {
         String dateContext = getCurrentDateContext();
         boolean hasImages = images != null && !images.isEmpty();
 
-        StringBuilder prompt = new StringBuilder();
-        prompt.append(systemPrompt).append("\n\n").append(dateContext);
-
-        // Вставляем историю переписки этого чата ДО текущего запроса —
-        // так модель видит весь диалог как единый контекст и может ссылаться
-        // на то, что обсуждалось раньше (имя, цифры, предыдущий план и т.д.).
+        StringBuilder sysContent = new StringBuilder();
+        sysContent.append(systemPrompt).append("\n\n").append(dateContext);
         if (historyText != null && !historyText.isBlank()) {
-            prompt.append("\n\nИстория переписки в этом чате (для контекста, не переспрашивай то, что уже обсуждалось):\n\n")
+            sysContent.append("\n\nИстория переписки в этом чате (для контекста, не переспрашивай то, что уже обсуждалось):\n\n")
                 .append(historyText);
         }
-
-        prompt.append("\n\nТекущий запрос пользователя: ").append(userMessage);
-
-        // Дублируем языковое правило в самом конце промпта — рядом с точкой,
-        // откуда модель начинает генерацию ответа. Для не-chat completion
-        // моделей (Ollama /api/generate без чат-шаблона) инструкции ближе
-        // к концу соблюдаются заметно надёжнее, чем только в начале промпта.
         if (languageReminder != null) {
-            prompt.append("\n\n[Напоминание перед ответом]: ").append(languageReminder);
+            sysContent.append("\n\n[Языковое правило]: ").append(languageReminder);
         }
 
-        ObjectNode body = mapper.createObjectNode();
-        // Если есть изображения — переключаемся на vision-модель, иначе обычную.
-        body.put("model", hasImages ? VISION_MODEL_NAME : MODEL_NAME);
-        body.put("prompt", prompt.toString());
-        body.put("stream", false);
+        ObjectNode systemMsg = mapper.createObjectNode();
+        systemMsg.put("role", "system");
+        systemMsg.put("content", sysContent.toString());
+
+        ObjectNode userMsg = mapper.createObjectNode();
+        userMsg.put("role", "user");
 
         if (hasImages) {
-            com.fasterxml.jackson.databind.node.ArrayNode imagesNode = mapper.createArrayNode();
+            // Мультимодальный content: текст + картинки как data-URL.
+            // Считаем jpeg по умолчанию (телефонные фото/скриншоты) — если
+            // реальный формат другой, современные vision-модели обычно всё
+            // равно корректно распознают контейнер по самим байтам.
+            com.fasterxml.jackson.databind.node.ArrayNode contentArray = mapper.createArrayNode();
+            ObjectNode textPart = mapper.createObjectNode();
+            textPart.put("type", "text");
+            textPart.put("text", userMessage);
+            contentArray.add(textPart);
             for (String base64 : images) {
-                imagesNode.add(base64);
+                ObjectNode imagePart = mapper.createObjectNode();
+                imagePart.put("type", "image_url");
+                ObjectNode imageUrl = mapper.createObjectNode();
+                String url = base64.startsWith("data:") ? base64 : "data:image/jpeg;base64," + base64;
+                imageUrl.put("url", url);
+                imagePart.set("image_url", imageUrl);
+                contentArray.add(imagePart);
             }
-            body.set("images", imagesNode);
+            userMsg.set("content", contentArray);
+        } else {
+            userMsg.put("content", userMessage);
         }
 
-        ObjectNode options = mapper.createObjectNode();
-        options.put("temperature", temperature);
-        body.set("options", options);
+        com.fasterxml.jackson.databind.node.ArrayNode messages = mapper.createArrayNode();
+        messages.add(systemMsg);
+        messages.add(userMsg);
 
-        HttpHeaders headers = new HttpHeaders();
-        headers.setContentType(MediaType.APPLICATION_JSON);
+        ObjectNode body = mapper.createObjectNode();
+        body.put("model", hasImages ? VISION_MODEL_NAME : MODEL_NAME);
+        body.set("messages", messages);
+        body.put("temperature", temperature);
+        body.put("stream", false);
 
-        HttpEntity<String> entity = new HttpEntity<>(body.toString(), headers);
+        HttpEntity<String> entity = new HttpEntity<>(body.toString(), groqHeaders());
 
         ResponseEntity<String> response = restTemplate.exchange(
-            "http://localhost:11434/api/generate",
+            GROQ_URL,
             HttpMethod.POST,
             entity,
             String.class
         );
 
         JsonNode json = mapper.readTree(response.getBody());
-        return json.get("response").asText();
+        JsonNode choices = json.get("choices");
+        if (choices == null || choices.size() == 0) {
+            throw new IllegalStateException("Groq не вернул ни одного варианта ответа");
+        }
+        JsonNode message = choices.get(0).get("message");
+        return message != null && message.has("content") ? message.get("content").asText("") : "";
     }
 }

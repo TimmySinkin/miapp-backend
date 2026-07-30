@@ -134,6 +134,12 @@ public class AccountLinkController {
             if (currentPassword == null || !passwordEncoder.matches(currentPassword, storedHash)) {
                 return ResponseEntity.status(401).body("Неверный текущий пароль");
             }
+            // Новый пароль не должен совпадать со старым — сверяем через bcrypt
+            // (а не строковым сравнением с currentPassword), чтобы поймать и
+            // случай "ввели тот же пароль другим регистром при сравнении хэша".
+            if (passwordEncoder.matches(newPassword, storedHash)) {
+                return ResponseEntity.badRequest().body("Новый пароль должен отличаться от текущего");
+            }
         }
 
         jdbc.update("UPDATE users SET password = ? WHERE login = ?",

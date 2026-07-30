@@ -5,7 +5,7 @@ import java.util.Map;
 
 import org.springframework.http.ResponseEntity;
 import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -34,17 +34,18 @@ public class AccountLinkController {
     private final JwtUtil jwtUtil;
     private final GoogleAuthService googleAuthService;
     private final TelegramAuthService telegramAuthService;
-    private final PasswordEncoder passwordEncoder;
+    // Не берём как бин через DI — в проекте нет отдельного @Bean
+    // PasswordEncoder (регистрация хеширует пароли сама, без Spring
+    // Security DI), поэтому создаём инстанс напрямую здесь же.
+    private final BCryptPasswordEncoder passwordEncoder = new BCryptPasswordEncoder();
 
     public AccountLinkController(JdbcTemplate jdbc, JwtUtil jwtUtil,
                                   GoogleAuthService googleAuthService,
-                                  TelegramAuthService telegramAuthService,
-                                  PasswordEncoder passwordEncoder) {
+                                  TelegramAuthService telegramAuthService) {
         this.jdbc = jdbc;
         this.jwtUtil = jwtUtil;
         this.googleAuthService = googleAuthService;
         this.telegramAuthService = telegramAuthService;
-        this.passwordEncoder = passwordEncoder;
     }
 
     /**

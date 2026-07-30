@@ -61,11 +61,37 @@ public class AccountLinkController {
             "(password IS NOT NULL) AS has_password, " +
             "(google_id IS NOT NULL) AS has_google, " +
             "(telegram_id IS NOT NULL) AS has_telegram, " +
-            "email, telegram_username, avatar_url " +
+            "email, telegram_username, avatar_url, login, name " +
             "FROM users WHERE login = ?",
             login
         );
         return ResponseEntity.ok(row);
+    }
+
+    /**
+     * "Как к вам обращаться" — свободное отображаемое имя, отдельное от
+     * login (которым логинятся) и не связанное ни с одним провайдером.
+     */
+    @PostMapping("/name")
+    public ResponseEntity<?> updateName(@RequestBody Map<String, String> body, HttpServletRequest request) {
+        String login;
+        try {
+            login = CurrentUser.require(request, jwtUtil);
+        } catch (CurrentUser.UnauthorizedException e) {
+            return ResponseEntity.status(401).body(e.getMessage());
+        }
+
+        String name = body.get("name");
+        if (name != null) name = name.trim();
+        if (name == null || name.isBlank()) {
+            return ResponseEntity.badRequest().body("Имя не может быть пустым");
+        }
+        if (name.length() > 100) {
+            return ResponseEntity.badRequest().body("Слишком длинное имя (максимум 100 символов)");
+        }
+
+        jdbc.update("UPDATE users SET name = ? WHERE login = ?", name, login);
+        return ResponseEntity.ok(Map.of("status", "ok", "name", name));
     }
 
     @PostMapping("/link/google")

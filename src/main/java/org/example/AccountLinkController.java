@@ -1,13 +1,19 @@
 package org.example;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import jakarta.servlet.http.HttpServletRequest;
-import org.springframework.http.ResponseEntity;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.web.bind.annotation.*;
-
 import java.util.List;
 import java.util.Map;
+
+import org.springframework.http.ResponseEntity;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+import com.fasterxml.jackson.databind.JsonNode;
+
+import jakarta.servlet.http.HttpServletRequest;
 
 /**
  * Привязка дополнительных способов входа (Google, Telegram) к УЖЕ
@@ -55,7 +61,7 @@ public class AccountLinkController {
             "(password IS NOT NULL) AS has_password, " +
             "(google_id IS NOT NULL) AS has_google, " +
             "(telegram_id IS NOT NULL) AS has_telegram, " +
-            "email " +
+            "email, telegram_username " +
             "FROM users WHERE login = ?",
             login
         );
@@ -121,6 +127,7 @@ public class AccountLinkController {
         }
 
         String telegramId = body.get("id");
+        String telegramUsername = body.get("username"); // может быть null — у юзера Telegram нет обязательного username
 
         List<String> byTelegramId = jdbc.queryForList(
             "SELECT login FROM users WHERE telegram_id = ?", String.class, telegramId);
@@ -128,7 +135,8 @@ public class AccountLinkController {
             return ResponseEntity.status(409).body("Этот Telegram-аккаунт уже привязан к другому пользователю");
         }
 
-        jdbc.update("UPDATE users SET telegram_id = ? WHERE login = ?", telegramId, login);
+        jdbc.update("UPDATE users SET telegram_id = ?, telegram_username = ? WHERE login = ?",
+            telegramId, telegramUsername, login);
 
         return ResponseEntity.ok(Map.of("status", "ok", "provider", "telegram"));
     }
@@ -176,7 +184,11 @@ public class AccountLinkController {
                 "Нельзя отвязать единственный способ входа — сначала задайте пароль или привяжите другой способ");
         }
 
-        jdbc.update("UPDATE users SET " + column + " = NULL WHERE login = ?", login);
+        if ("telegram_id".equals(column)) {
+            jdbc.update("UPDATE users SET telegram_id = NULL, telegram_username = NULL WHERE login = ?", login);
+        } else {
+            jdbc.update("UPDATE users SET " + column + " = NULL WHERE login = ?", login);
+        }
         return ResponseEntity.ok(Map.of("status", "ok"));
     }
 }

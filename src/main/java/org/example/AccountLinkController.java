@@ -5,6 +5,7 @@ import java.util.Map;
 
 import org.springframework.http.ResponseEntity;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -33,14 +34,17 @@ public class AccountLinkController {
     private final JwtUtil jwtUtil;
     private final GoogleAuthService googleAuthService;
     private final TelegramAuthService telegramAuthService;
+    private final PasswordEncoder passwordEncoder;
 
     public AccountLinkController(JdbcTemplate jdbc, JwtUtil jwtUtil,
                                   GoogleAuthService googleAuthService,
-                                  TelegramAuthService telegramAuthService) {
+                                  TelegramAuthService telegramAuthService,
+                                  PasswordEncoder passwordEncoder) {
         this.jdbc = jdbc;
         this.jwtUtil = jwtUtil;
         this.googleAuthService = googleAuthService;
         this.telegramAuthService = telegramAuthService;
+        this.passwordEncoder = passwordEncoder;
     }
 
     /**
@@ -92,6 +96,49 @@ public class AccountLinkController {
 
         jdbc.update("UPDATE users SET name = ? WHERE login = ?", name, login);
         return ResponseEntity.ok(Map.of("status", "ok", "name", name));
+    }
+
+    /**
+     * Смена пароля — либо первое добавление (у пользователя, вошедшего
+     * только через Google/Telegram, password IS NULL), либо обычная смена.
+     * В первом случае currentPassword не проверяем — сверять нечего.
+     */
+    @PostMapping("/change-password")
+    public ResponseEntity<?> changePassword(@RequestBody Map<String, String> body, HttpServletRequest request) {
+        String login;
+        try {
+            login = CurrentUser.require(request, jwtUtil);
+        } catch (CurrentUser.UnauthorizedException e) {
+            return ResponseEntity.status(401).body(e.getMessage());
+        }
+
+        String currentPassword = body.get("currentPassword");
+        String newPassword = body.get("newPassword");
+
+        if (newPassword == null
+                || newPassword.length() < 6
+                || !newPassword.matches("^[A-Z].*")
+                || !newPassword.matches(".*[0-9!@#$%^&*()_+\\-=\\[\\]{};':\"\\\\|,.<>/?~`].*")
+                || !newPassword.matches("^[A-Za-z0-9!@#$%^&*()_+\\-=\\[\\]{};':\"\\\\|,.<>/?~`]*$")) {
+            return ResponseEntity.badRequest().body("Новый пароль не соответствует требованиям");
+        }
+
+        String storedHash = jdbc.queryForObject(
+            "SELECT password FROM users WHERE login = ?", String.class, login);
+
+        if (storedHash != null) {
+            // Пароль уже есть — это смена, а не первое добавление. Обязательно
+            // сверяем текущий, иначе кто угодно с угнанной сессией мог бы
+            // переустановить пароль без знания старого.
+            if (currentPassword == null || !passwordEncoder.matches(currentPassword, storedHash)) {
+                return ResponseEntity.status(401).body("Неверный текущий пароль");
+            }
+        }
+
+        jdbc.update("UPDATE users SET password = ? WHERE login = ?",
+            passwordEncoder.encode(newPassword), login);
+
+        return ResponseEntity.ok(Map.of("status", "ok"));
     }
 
     @PostMapping("/link/google")

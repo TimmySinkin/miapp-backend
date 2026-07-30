@@ -45,9 +45,10 @@ public class ClaudeController {
     private static final String GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
 
     // Модель вынесена отдельно — легко поменять в одном месте.
-    // qwen/qwen3-32b — бесплатный тариф Groq (1000 запросов/день, 6000 токенов/мин
-    // на момент написания), надёжный tool calling, крупнее прежней локальной 14b.
-    private static final String MODEL_NAME = "qwen/qwen3-32b";
+    // qwen/qwen3-32b была снята Groq с продакшена (депрекация анонсирована
+    // 17 июня 2026) — переходим на рекомендованную замену openai/gpt-oss-120b:
+    // хороший reasoning и надёжный tool calling, бесплатный тариф Groq.
+    private static final String MODEL_NAME = "openai/gpt-oss-120b";
     // Vision-модель для запросов с изображениями — мультимодальная (preview на
     // стороне Groq на момент написания, состав моделей может меняться).
     private static final String VISION_MODEL_NAME = "qwen/qwen3.6-27b";
@@ -336,11 +337,11 @@ public class ClaudeController {
             body.put("model", MODEL_NAME);
             body.put("stream", false);
             body.put("temperature", 0.7);
-            // qwen3 на Groq: reasoning_effort "default" оставляет модели её
-            // обычное рассуждение перед ответом (важно для надёжного tool
-            // calling — без этого модель чаще просто текстом пересказывает,
-            // что стоило бы поискать, вместо реального вызова инструмента).
-            body.put("reasoning_effort", "default");
+            // reasoning_effort убран: у qwen3 (none/default) и gpt-oss (low/medium/
+            // high) разные допустимые значения этого параметра — жёстко заданное
+            // значение подходило бы только одной модельной семье и рисковало бы
+            // 400-ошибкой при следующей смене модели. Обе семьи разумно
+            // рассуждают и без явного указания этого параметра.
 
             com.fasterxml.jackson.databind.node.ArrayNode messagesArray = mapper.createArrayNode();
             for (ObjectNode m : messages) messagesArray.add(m);

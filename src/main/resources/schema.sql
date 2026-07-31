@@ -107,3 +107,17 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url VARCHAR(500);
 -- 'tasks' — чтобы уже существующие строки (сохранённые до этой миграции)
 -- не потерялись из статистики, а просто попали в категорию "Задачи".
 ALTER TABLE day_tasks ADD COLUMN IF NOT EXISTS category TEXT NOT NULL DEFAULT 'tasks';
+
+-- Сначала таблицы без FK-констрейнта на users (иначе останутся сиротами)
+DELETE FROM day_tasks;
+DELETE FROM goals;
+DELETE FROM studies;
+DELETE FROM workouts;
+
+-- ai_messages и ai_chats удалятся каскадно через ON DELETE CASCADE при удалении users,
+-- но можно и явно, если хотите быть уверены в порядке:
+DELETE FROM ai_messages;
+DELETE FROM ai_chats;
+
+-- И сами пользователи
+DELETE FROM users;

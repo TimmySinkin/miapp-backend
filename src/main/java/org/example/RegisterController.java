@@ -96,35 +96,27 @@ public class RegisterController {
             return ResponseEntity.badRequest().body(passwordError);
         }
 
-        // Уже есть подтверждённый пользователь с таким логином — обычный конфликт.
+        // Уже есть подтверждённый пользователь с таким логином — реальный конфликт,
+        // логин занят и трогать его нельзя.
         User existingByLogin = db.loadUserByLogin(login);
         if (existingByLogin != null) {
-            Boolean verified = isVerified(login);
-            if (Boolean.TRUE.equals(verified)) {
+            if (Boolean.TRUE.equals(isVerified(login))) {
                 return ResponseEntity.status(HttpStatus.CONFLICT).body("Пользователь уже существует!");
             }
-            // Неподтверждённая попытка регистрации существует.
-            if (!isExpired(login)) {
-                return ResponseEntity.status(HttpStatus.CONFLICT).body(
-                    "На этот логин уже отправлен код подтверждения — проверьте почту или запросите новый код"
-                );
-            }
-            // Код истёк и не подтверждён — освобождаем логин, регистрируем заново.
+            // Неподтверждённая попытка регистрации на этот логин — не блокируем
+            // новую попытку 409-м (код мог не дойти, истечь, или человек просто
+            // ошибся и пробует заново). Просто затираем старую заявку и создаём
+            // её заново ниже, со свежим кодом.
             jdbc.update("DELETE FROM users WHERE login = ?", login);
         }
 
         List<String> byEmailLogin = jdbc.queryForList("SELECT login FROM users WHERE email = ?", String.class, email);
         if (!byEmailLogin.isEmpty()) {
             String existingLogin = byEmailLogin.get(0);
-            Boolean verified = isVerified(existingLogin);
-            if (Boolean.TRUE.equals(verified)) {
+            if (Boolean.TRUE.equals(isVerified(existingLogin))) {
                 return ResponseEntity.status(HttpStatus.CONFLICT).body("Этот email уже зарегистрирован!");
             }
-            if (!isExpired(existingLogin)) {
-                return ResponseEntity.status(HttpStatus.CONFLICT).body(
-                    "На этот email уже отправлен код подтверждения — проверьте почту или запросите новый код"
-                );
-            }
+            // Аналогично — неподтверждённую заявку на этот email просто заменяем.
             jdbc.update("DELETE FROM users WHERE login = ?", existingLogin);
         }
 
@@ -230,13 +222,5 @@ public class RegisterController {
             "SELECT verified FROM users WHERE login = ?", Boolean.class, login
         );
         return res.isEmpty() ? null : res.get(0);
-    }
-
-    private boolean isExpired(String login) {
-        List<Timestamp> res = jdbc.queryForList(
-            "SELECT verification_expires FROM users WHERE login = ?", Timestamp.class, login
-        );
-        if (res.isEmpty() || res.get(0) == null) return true;
-        return res.get(0).toLocalDateTime().isBefore(LocalDateTime.now());
     }
 }

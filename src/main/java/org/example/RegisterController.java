@@ -1,12 +1,5 @@
 package org.example;
 
-import jakarta.servlet.http.HttpServletResponse;
-import org.springframework.http.HttpStatus;
-import org.springframework.http.ResponseEntity;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
-import org.springframework.web.bind.annotation.*;
-
 import java.security.SecureRandom;
 import java.sql.Timestamp;
 import java.time.LocalDateTime;
@@ -14,9 +7,24 @@ import java.util.List;
 import java.util.Map;
 import java.util.regex.Pattern;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+import jakarta.servlet.http.HttpServletResponse;
+
 @RestController
 @RequestMapping("/api")
 public class RegisterController {
+
+    private static final Logger log = LoggerFactory.getLogger(RegisterController.class);
 
     private final DatabaseService db;
     private final JdbcTemplate jdbc;
@@ -134,6 +142,9 @@ public class RegisterController {
         try {
             mailService.sendVerificationCode(email, code);
         } catch (Exception e) {
+            // Раньше эта ошибка нигде не логировалась — 503 отдавался фронту,
+            // а реальная причина (SMTP auth/timeout/etc.) пропадала бесследно.
+            log.error("Не удалось отправить письмо с кодом подтверждения на {}", email, e);
             // Не удалось отправить письмо — не оставляем висеть "мёртвого" неподтверждённого
             // пользователя, который потом молча блокирует этот логин/email навсегда.
             jdbc.update("DELETE FROM users WHERE login = ?", login);
@@ -207,6 +218,7 @@ public class RegisterController {
         try {
             mailService.sendVerificationCode(email, code);
         } catch (Exception e) {
+            log.error("Не удалось повторно отправить письмо с кодом на {}", email, e);
             return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body("Не удалось отправить письмо, попробуйте позже");
         }
 

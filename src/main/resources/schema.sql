@@ -100,3 +100,10 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS telegram_id TEXT UNIQUE;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS telegram_username VARCHAR(255);
 
 ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url VARCHAR(500);
+
+-- Категория задачи (Задачи/Личные цели/Досуг) — используется графиком
+-- продуктивности и бубликом распределения на странице статистики, а также
+-- цветными точками-переключателями на Home и в плане ИИ-агента. DEFAULT
+-- 'tasks' — чтобы уже существующие строки (сохранённые до этой миграции)
+-- не потерялись из статистики, а просто попали в категорию "Задачи".
+ALTER TABLE day_tasks ADD COLUMN IF NOT EXISTS category TEXT NOT NULL DEFAULT 'tasks';

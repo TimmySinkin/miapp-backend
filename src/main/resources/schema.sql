@@ -108,7 +108,7 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url VARCHAR(500);
 -- не потерялись из статистики, а просто попали в категорию "Задачи".
 ALTER TABLE day_tasks ADD COLUMN IF NOT EXISTS category TEXT NOT NULL DEFAULT 'tasks';
 
--- Сначала таблицы без FK-констрейнта на users (иначе останутся сиротами)
+/*-- Сначала таблицы без FK-констрейнта на users (иначе останутся сиротами)
 DELETE FROM day_tasks;
 DELETE FROM goals;
 DELETE FROM studies;
@@ -120,4 +120,4 @@ DELETE FROM ai_messages;
 DELETE FROM ai_chats;
 
 -- И сами пользователи
-DELETE FROM users;
+DELETE FROM users;*/

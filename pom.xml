@@ -44,12 +44,6 @@
       <artifactId>spring-boot-starter-security</artifactId>
     </dependency>
 
-    <!-- Отправка писем (код подтверждения email при регистрации) -->
-    <dependency>
-      <groupId>org.springframework.boot</groupId>
-      <artifactId>spring-boot-starter-mail</artifactId>
-    </dependency>
-
     <!-- JWT (для токена сессии в httpOnly cookie) -->
     <dependency>
       <groupId>io.jsonwebtoken</groupId>
@@ -74,6 +68,18 @@
     <dependency>
       <groupId>software.amazon.awssdk</groupId>
       <artifactId>s3</artifactId>
+      <version>2.25.60</version>
+    </dependency>
+
+    <!-- Отправка писем (код подтверждения email при регистрации) — через
+         Yandex Cloud Postbox, у которого AWS SES-совместимый API, поэтому
+         тоже используется AWS SDK (тот же модуль AWS SDK v2, что и для S3
+         выше, чтобы версии не расходились). Render на бесплатном тарифе
+         блокирует исходящий SMTP (25/465/587), а обычный HTTPS — нет,
+         поэтому обычный spring-boot-starter-mail (SMTP) здесь не подходит. -->
+    <dependency>
+      <groupId>software.amazon.awssdk</groupId>
+      <artifactId>sesv2</artifactId>
       <version>2.25.60</version>
     </dependency>
 

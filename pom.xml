@@ -19,6 +19,12 @@
   </properties>
 
   <dependencies>
+
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-actuator</artifactId>
+    </dependency>
+
     <!-- Spring Boot Web -->
     <dependency>
       <groupId>org.springframework.boot</groupId>
@@ -63,7 +69,7 @@
       <scope>runtime</scope>
     </dependency>
 
-     <!-- AWS S3 SDK — нужен для StorageService.java (загрузка аватаров в Yandex Object Storage,
+    <!-- AWS S3 SDK — нужен для StorageService.java (загрузка аватаров в Yandex Object Storage,
          он S3-совместимый, поэтому используется именно AWS SDK) -->
     <dependency>
       <groupId>software.amazon.awssdk</groupId>
@@ -90,7 +96,13 @@
       <scope>test</scope>
     </dependency>
   </dependencies>
+
   <build>
+    <!-- Фиксируем имя собранного jar как app.jar (вместо стандартного
+         MiniApp-1.0-SNAPSHOT.jar) — так оно совпадает с командой запуска
+         "java -jar target/app.jar", которую ждёт Timeweb App Platform,
+         независимо от того, как называются artifactId/version в будущем. -->
+    <finalName>app</finalName>
     <plugins>
       <plugin>
         <groupId>org.springframework.boot</groupId>

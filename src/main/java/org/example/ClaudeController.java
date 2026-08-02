@@ -24,7 +24,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 public class ClaudeController {
 
     // Таймаут по умолчанию у RestTemplate() — БЕСКОНЕЧНЫЙ. Явно задаём разумные
-    // границы: 10 сек на подключение, 2 минуты на чтение (Groq работает быстро,
+    // границы: 10 сек на подключение, 2 минуты на чтение (YandexGPT работает быстро,
     // это далеко не Ollama, но запас на сеть/ретраи не помешает).
     private final RestTemplate restTemplate = buildRestTemplateWithTimeouts();
 
@@ -36,22 +36,35 @@ public class ClaudeController {
     }
     private final ObjectMapper mapper = new ObjectMapper();
 
-    // Groq — облачный API, доступный откуда угодно (в отличие от Ollama на
-    // localhost, которая недоступна бэкенду, задеплоенному на Render).
-    // Ключ берём из переменной окружения — задайте GROQ_API_KEY в настройках
-    // сервиса на Render (или локально через export GROQ_API_KEY=...).
-    // Получить ключ: https://console.groq.com/keys (бесплатно, без карты).
-    private static final String GROQ_API_KEY = System.getenv("GROQ_API_KEY");
-    private static final String GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
+    // YandexGPT — OpenAI-совместимый endpoint Yandex AI Studio. Переехали сюда
+    // с Groq, потому что Groq геоблокирует запросы с российских IP (санкционная
+    // политика OFAC) — сервер сейчас физически в России (Beget), и без VPN
+    // Groq отвечал 403 Forbidden. YandexGPT работает с российских IP нативно.
+    //
+    // Нужны ДВЕ переменные окружения (обе обязательны):
+    // - YANDEX_AI_API_KEY   — API-ключ сервисного аккаунта с ролью ai.languageModels.user
+    //                         (создаётся в Yandex Cloud Console -> Service accounts -> API keys)
+    // - YANDEX_AI_FOLDER_ID — ID каталога (folder) в Yandex Cloud, куда привязан ключ
+    //                         (виден в консоли рядом с названием каталога)
+    private static final String YANDEX_AI_API_KEY = System.getenv("YANDEX_AI_API_KEY");
+    private static final String YANDEX_AI_FOLDER_ID = System.getenv("YANDEX_AI_FOLDER_ID");
+    private static final String YANDEX_URL = "https://ai.api.cloud.yandex.net/v1/chat/completions";
 
-    // Модель вынесена отдельно — легко поменять в одном месте.
-    // qwen/qwen3-32b была снята Groq с продакшена (депрекация анонсирована
-    // 17 июня 2026) — переходим на рекомендованную замену openai/gpt-oss-120b:
-    // хороший reasoning и надёжный tool calling, бесплатный тариф Groq.
-    private static final String MODEL_NAME = "openai/gpt-oss-120b";
-    // Vision-модель для запросов с изображениями — мультимодальная (preview на
-    // стороне Groq на момент написания, состав моделей может меняться).
-    private static final String VISION_MODEL_NAME = "qwen/qwen3.6-27b";
+    // Модель задаётся URI вида gpt://<folder_id>/<model>/<версия>.
+    // "rc" — release candidate ветка (обычно свежее и умнее "latest",
+    // рекомендована Yandex для новых интеграций на момент миграции).
+    // Собирается лениво (folder id известен только в рантайме из env).
+    private static String modelUri(String modelName) {
+        return "gpt://" + YANDEX_AI_FOLDER_ID + "/" + modelName + "/rc";
+    }
+    private static final String MODEL_NAME_BASE = "yandexgpt";
+    // Явного подтверждения поддержки vision (картинок) через OpenAI-совместимый
+    // endpoint YandexGPT на момент миграции найдено не было — используем ту же
+    // текстовую модель для vision-запросов как временное решение. Если Yandex
+    // не примет image_url в content, здесь нужно будет вернуть отдельную
+    // vision-модель, когда Yandex явно её анонсирует (или переключить этот путь
+    // обратно на Groq / другого провайдера только для запросов с картинками).
+    private static final String VISION_MODEL_NAME_BASE = "yandexgpt";
 
     private static final String CHAT_SYSTEM_PROMPT =
         "Ты — AI-ассистент в приложении-органайзере MiniApp. " +
@@ -296,7 +309,7 @@ public class ClaudeController {
         return tool;
     }
 
-    // Настоящий tool calling через Groq /chat/completions (OpenAI-совместимый
+    // Настоящий tool calling через YandexGPT /chat/completions (OpenAI-совместимый
     // формат) — раньше это был локальный Ollama /api/chat. Модель сама решает
     // по ходу диалога, нужен ли ей web_search, и может вызвать его несколько
     // раз подряд, прежде чем дать финальный текстовый ответ.
@@ -334,7 +347,7 @@ public class ClaudeController {
         int maxIterations = 4; // защита от зацикливания, если модель бесконечно зовёт инструмент
         for (int iter = 0; iter < maxIterations; iter++) {
             ObjectNode body = mapper.createObjectNode();
-            body.put("model", MODEL_NAME);
+            body.put("model", modelUri(MODEL_NAME_BASE));
             body.put("stream", false);
             body.put("temperature", 0.7);
             // reasoning_effort убран: у qwen3 (none/default) и gpt-oss (low/medium/
@@ -348,10 +361,10 @@ public class ClaudeController {
             body.set("messages", messagesArray);
             if (toolsArray != null) body.set("tools", toolsArray);
 
-            HttpEntity<String> entity = new HttpEntity<>(body.toString(), groqHeaders());
+            HttpEntity<String> entity = new HttpEntity<>(body.toString(), yandexHeaders());
 
             ResponseEntity<String> response = restTemplate.exchange(
-                GROQ_URL,
+                YANDEX_URL,
                 HttpMethod.POST,
                 entity,
                 String.class
@@ -377,7 +390,7 @@ public class ClaudeController {
                     String name = function != null && function.has("name") ? function.get("name").asText("") : "";
                     // В OpenAI-совместимом формате (в отличие от Ollama) каждый
                     // tool_call имеет свой "id", и ответное сообщение ОБЯЗАНО
-                    // содержать tool_call_id с тем же значением — иначе Groq
+                    // содержать tool_call_id с тем же значением — иначе Yandex
                     // не сможет сопоставить результат с вызовом.
                     String toolCallId = toolCall.has("id") ? toolCall.get("id").asText("") : "";
 
@@ -681,22 +694,30 @@ public class ClaudeController {
         return Character.toUpperCase(s.charAt(0)) + s.substring(1);
     }
 
-    // Возвращает базовые заголовки с Bearer-токеном Groq — общие для всех
-    // запросов к их API.
-    private HttpHeaders groqHeaders() {
-        if (GROQ_API_KEY == null || GROQ_API_KEY.isBlank()) {
+    // Возвращает базовые заголовки для Yandex AI Studio. В отличие от Groq,
+    // формат авторизации у Yandex — "Api-Key <ключ>", а не "Bearer <ключ>",
+    // и дополнительно нужен заголовок с folder ID (каталогом), к которому
+    // привязан ключ.
+    private HttpHeaders yandexHeaders() {
+        if (YANDEX_AI_API_KEY == null || YANDEX_AI_API_KEY.isBlank()) {
             throw new IllegalStateException(
-                "GROQ_API_KEY не задан. Установите переменную окружения GROQ_API_KEY " +
-                "(ключ из https://console.groq.com/keys) на сервере, где запущен бэкенд.");
+                "YANDEX_AI_API_KEY не задан. Установите переменную окружения YANDEX_AI_API_KEY " +
+                "(API-ключ сервисного аккаунта из Yandex Cloud Console) на сервере, где запущен бэкенд.");
+        }
+        if (YANDEX_AI_FOLDER_ID == null || YANDEX_AI_FOLDER_ID.isBlank()) {
+            throw new IllegalStateException(
+                "YANDEX_AI_FOLDER_ID не задан. Установите переменную окружения YANDEX_AI_FOLDER_ID " +
+                "(ID каталога в Yandex Cloud, к которому привязан API-ключ) на сервере, где запущен бэкенд.");
         }
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.APPLICATION_JSON);
-        headers.set("Authorization", "Bearer " + GROQ_API_KEY);
+        headers.set("Authorization", "Api-Key " + YANDEX_AI_API_KEY);
+        headers.set("x-folder-id", YANDEX_AI_FOLDER_ID);
         return headers;
     }
 
     // Раньше это был вызов Ollama /api/generate (одна плоская строка prompt,
-    // без понятия "чат-сообщений"). Groq — полностью OpenAI-совместимый API,
+    // без понятия "чат-сообщений"). YandexGPT — OpenAI-совместимый API,
     // умеющий только chat completions, поэтому системный промпт и запрос
     // пользователя собираются в messages: [{role:system}, {role:user}],
     // а для изображений content становится массивом {type:text}/{type:image_url}
@@ -758,15 +779,15 @@ public class ClaudeController {
         messages.add(userMsg);
 
         ObjectNode body = mapper.createObjectNode();
-        body.put("model", hasImages ? VISION_MODEL_NAME : MODEL_NAME);
+        body.put("model", modelUri(hasImages ? VISION_MODEL_NAME_BASE : MODEL_NAME_BASE));
         body.set("messages", messages);
         body.put("temperature", temperature);
         body.put("stream", false);
 
-        HttpEntity<String> entity = new HttpEntity<>(body.toString(), groqHeaders());
+        HttpEntity<String> entity = new HttpEntity<>(body.toString(), yandexHeaders());
 
         ResponseEntity<String> response = restTemplate.exchange(
-            GROQ_URL,
+            YANDEX_URL,
             HttpMethod.POST,
             entity,
             String.class
@@ -775,7 +796,7 @@ public class ClaudeController {
         JsonNode json = mapper.readTree(response.getBody());
         JsonNode choices = json.get("choices");
         if (choices == null || choices.size() == 0) {
-            throw new IllegalStateException("Groq не вернул ни одного варианта ответа");
+            throw new IllegalStateException("YandexGPT не вернул ни одного варианта ответа");
         }
         JsonNode message = choices.get(0).get("message");
         return message != null && message.has("content") ? message.get("content").asText("") : "";

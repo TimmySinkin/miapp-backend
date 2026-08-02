@@ -1,0 +1,38 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DATABASE_NAME}
+      POSTGRES_USER: ${DATABASE_USERNAME}
+      POSTGRES_PASSWORD: ${DATABASE_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    # Порт БД наружу (за пределы сервера) не открываем — только для
+    # локальной отладки с самого сервера, если понадобится.
+    ports:
+      - "127.0.0.1:5432:5432"
+
+  backend:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      - postgres
+    environment:
+      # JdbcTemplate достучится до Postgres по имени сервиса "postgres" —
+      # Docker Compose сам поднимает внутреннюю сеть между контейнерами.
+      DATABASE_URL: jdbc:postgresql://postgres:5432/${DATABASE_NAME}
+      DATABASE_USERNAME: ${DATABASE_USERNAME}
+      DATABASE_PASSWORD: ${DATABASE_PASSWORD}
+      PORT: 8080
+      YANDEX_POSTBOX_ACCESS_KEY: ${YANDEX_POSTBOX_ACCESS_KEY}
+      YANDEX_POSTBOX_SECRET_KEY: ${YANDEX_POSTBOX_SECRET_KEY}
+      YANDEX_BUCKET: ${YANDEX_BUCKET}
+      YANDEX_ACCESS_KEY: ${YANDEX_ACCESS_KEY}
+      YANDEX_SECRET_KEY: ${YANDEX_SECRET_KEY}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+    ports:
+      - "8080:8080"
+
+volumes:
+  pgdata:

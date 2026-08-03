@@ -342,7 +342,17 @@ public class ClaudeController {
     // это "исполнитель" инструмента web_search, который модель вызывает сама через tool calling.
     private String webSearch(String query) {
         try {
+            // ВАЖНО: без явного .version(HTTP_1_1) Java HttpClient сам предлагает
+            // HTTP/2 (см. ALPN offers h2,http/1.1 в TLS handshake) — а curl по
+            // умолчанию использует HTTP/1.1. На практике DuckDuckGo отвечал Java-
+            // клиенту статусом 202 и обычной главной страницой (антибот-заглушка),
+            // хотя ИДЕНТИЧНЫЙ запрос через curl (HTTP/1.1) получал 200 и реальные
+            // результаты. Похоже, DDG частично отличает автоматизированные
+            // HTTP/2-клиенты. Форсируем HTTP/1.1 и добавляем типичные для браузера
+            // заголовки (Accept, Accept-Language), чтобы запрос выглядел ближе
+            // к curl/браузеру, а не к голому HttpClient по умолчанию.
             java.net.http.HttpClient client = java.net.http.HttpClient.newBuilder()
+                .version(java.net.http.HttpClient.Version.HTTP_1_1)
                 .connectTimeout(java.time.Duration.ofSeconds(5))
                 .build();
             // ВАЖНО: DuckDuckGo Lite отдаёт реальные результаты только на POST
@@ -353,8 +363,12 @@ public class ClaudeController {
             String body = "q=" + java.net.URLEncoder.encode(query, "UTF-8");
             java.net.http.HttpRequest req = java.net.http.HttpRequest.newBuilder()
                 .uri(java.net.URI.create("https://lite.duckduckgo.com/lite/"))
-                .header("User-Agent", "Mozilla/5.0")
+                .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+                .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+                .header("Accept-Language", "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7")
                 .header("Content-Type", "application/x-www-form-urlencoded")
+                .header("Origin", "https://lite.duckduckgo.com")
+                .header("Referer", "https://lite.duckduckgo.com/lite/")
                 .timeout(java.time.Duration.ofSeconds(6))
                 .POST(java.net.http.HttpRequest.BodyPublishers.ofString(body))
                 .build();

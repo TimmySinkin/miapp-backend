@@ -16,6 +16,7 @@
 
   <properties>
     <java.version>17</java.version>
+    <start-class>org.example.App</start-class>
   </properties>
 
   <dependencies>
@@ -110,10 +111,15 @@
          независимо от того, как называются artifactId/version в будущем. -->
     <finalName>app</finalName>
     <plugins>
+
       <plugin>
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-maven-plugin</artifactId>
+        <configuration>
+            <mainClass>org.example.App</mainClass>
+        </configuration>
       </plugin>
+
     </plugins>
   </build>
 </project>

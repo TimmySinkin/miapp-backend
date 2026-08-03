@@ -364,24 +364,35 @@ public class ClaudeController {
             System.out.println("[webSearch] превью тела: " +
                 html.substring(0, Math.min(500, html.length())).replace("\n", " | "));
 
-            // Грубый, но зависимостей не требующий парсинг HTML lite-версии DDG:
-            // строки результатов вида <a class="result-link" href="...">Заголовок</a>
-            // и рядом <td class="result-snippet">Сниппет</td>. class=["']? — на
-            // случай, если DDG иногда отдаёт class=result-link' без открывающей
-            // кавычки (реально встречалось в ответах), чтобы не терять такие строки.
-            java.util.regex.Matcher linkMatcher = java.util.regex.Pattern
-                .compile("class=[\"']?result-link[\"']?[^>]*href=\"([^\"]+)\"[^>]*>(.*?)</a>", java.util.regex.Pattern.DOTALL)
+            // Грубый, но зависимостей не требующий парсинг HTML lite-версии DDG.
+            // ВАЖНО: реальная разметка DDG отдаёт атрибуты в порядке
+            // <a rel="nofollow" href="..." class='result-link'>Заголовок</a> —
+            // то есть href идёт ПЕРЕД class, а не после, как можно было бы
+            // наивно предположить. Прежний regex жёстко требовал class first,
+            // href second — и поэтому не находил вообще ничего, хотя ссылки
+            // реально были в ответе. Теперь сначала берём весь тег <a ...>...</a>
+            // целиком, а атрибуты (class и href) вытаскиваем из него отдельно,
+            // независимо от их взаимного порядка.
+            java.util.regex.Matcher anchorMatcher = java.util.regex.Pattern
+                .compile("<a\\s+([^>]*)>(.*?)</a>", java.util.regex.Pattern.DOTALL)
                 .matcher(html);
-            java.util.regex.Matcher snippetMatcher = java.util.regex.Pattern
-                .compile("class=[\"']?result-snippet[\"']?[^>]*>(.*?)</td>", java.util.regex.Pattern.DOTALL)
-                .matcher(html);
+            java.util.regex.Pattern hrefPattern = java.util.regex.Pattern.compile("href=\"([^\"]+)\"");
+            java.util.regex.Pattern classPattern = java.util.regex.Pattern.compile("class=[\"']?result-link[\"']?");
 
             java.util.List<String> links = new java.util.ArrayList<>();
             java.util.List<String> titleTexts = new java.util.ArrayList<>();
-            while (linkMatcher.find() && links.size() < 6) {
-                links.add(linkMatcher.group(1));
-                titleTexts.add(stripHtmlTags(linkMatcher.group(2)));
+            while (anchorMatcher.find() && links.size() < 6) {
+                String attrs = anchorMatcher.group(1);
+                if (!classPattern.matcher(attrs).find()) continue; // не result-link — пропускаем
+                java.util.regex.Matcher hrefMatcher = hrefPattern.matcher(attrs);
+                if (!hrefMatcher.find()) continue;
+                links.add(hrefMatcher.group(1));
+                titleTexts.add(stripHtmlTags(anchorMatcher.group(2)));
             }
+
+            java.util.regex.Matcher snippetMatcher = java.util.regex.Pattern
+                .compile("class=[\"']?result-snippet[\"']?[^>]*>(.*?)</td>", java.util.regex.Pattern.DOTALL)
+                .matcher(html);
             java.util.List<String> snippets = new java.util.ArrayList<>();
             while (snippetMatcher.find() && snippets.size() < 6) {
                 snippets.add(stripHtmlTags(snippetMatcher.group(1)));

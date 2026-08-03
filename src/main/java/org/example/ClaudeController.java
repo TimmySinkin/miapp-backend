@@ -233,7 +233,27 @@ public class ClaudeController {
         "«проверенных», «классических» или «широко известных». Единственный допустимый ответ в этом " +
         "случае — сообщить, что поиск не дал результатов, и предложить переформулировать запрос " +
         "(например, уточнить жанр, десятилетие или страну). Подмена пустого результата поиска списком " +
-        "из собственной памяти — это то же самое, что придумать факты, и запрещено без исключений.";
+        "из собственной памяти — это то же самое, что придумать факты, и запрещено без исключений.\n\n" +
+        "УТОЧНЯЮЩИЕ ВОПРОСЫ ПЕРЕД РЕКОМЕНДАЦИЕЙ:\n" +
+        "Если пользователь просит совет/рекомендацию (фильм, книга, подарок, рецепт, куда пойти и т.п.), " +
+        "и без дополнительного контекста твой ответ будет слишком общим или может не подойти именно " +
+        "этому человеку — сначала задай 1–2 КОРОТКИХ уточняющих вопроса с вариантами ответа, " +
+        "и только затем давай финальную рекомендацию.\n" +
+        "НЕ уточняй, если: запрос уже достаточно конкретный (например, «посоветуй фильм ужасов 2020-х»), " +
+        "это фактический вопрос без элемента личного выбора («сколько калорий в яблоке»), " +
+        "или это цель/план с достижением результата за срок (для них другой сценарий, уточнения не нужны).\n" +
+        "Максимум ОДИН раунд уточнений за диалог — если пользователь уже ответил на уточняющие вопросы " +
+        "(или это видно из истории переписки), сразу давай финальный ответ, не спрашивай снова.\n" +
+        "Формат уточняющего вопроса — ЕДИНСТВЕННО ДОПУСТИМЫЙ, когда решаешь уточнить: ответь СТРОГО так, " +
+        "без единого слова до или после этого блока (это распарсит бэкенд, не пользователь):\n" +
+        "<<<CLARIFY>>>\n" +
+        "{\"text\": \"Короткая дружелюбная фраза о том, что ты уточняешь детали (1 предложение)\", " +
+        "\"questions\": [{\"id\": \"короткий_id_на_латинице\", \"question\": \"Текст вопроса?\", " +
+        "\"options\": [\"Вариант 1\", \"Вариант 2\", \"Вариант 3\"]}]}\n" +
+        "<<<END>>>\n" +
+        "Никогда не смешивай этот блок с обычным markdown-ответом в одном сообщении — либо ты " +
+        "задаёшь уточняющий вопрос строго в этом формате и ничего больше, либо даёшь обычный " +
+        "финальный ответ в markdown без этого блока вообще.";
 
     private static final String PLAN_SYSTEM_PROMPT =
         "Ты — AI-планировщик задач для календаря приложения MiniApp. " +
@@ -754,7 +774,7 @@ public class ClaudeController {
                     : chatWithFailover(systemPrompt, userMessage.toString(), historyText, true);
             }
 
-            return ResponseEntity.ok(reply);
+            return ResponseEntity.ok(wrapChatReply(reply));
         } catch (Exception e) {
             // Раньше исключение просто проглатывалось — в консоли бэкенда было
             // тихо даже при реальном 500. Теперь печатаем стек-трейс, иначе
@@ -765,7 +785,44 @@ public class ClaudeController {
         }
     }
 
-   @PostMapping("/plan")
+    // Превращает сырой ответ модели в JSON-контракт для фронта: либо
+    // {"type":"answer","text":"..."} — обычный markdown-ответ как раньше,
+    // либо {"type":"clarify","text":"...","questions":[...]} — если модель
+    // решила сначала уточнить детали (см. блок <<<CLARIFY>>>...<<<END>>> в
+    // системном промпте). Любая ошибка парсинга — безопасный откат на
+    // обычный текстовый ответ, чтобы битый JSON от модели не ронял чат.
+    private String wrapChatReply(String reply) {
+        try {
+            int start = reply.indexOf("<<<CLARIFY>>>");
+            int end = reply.indexOf("<<<END>>>");
+            if (start >= 0 && end > start) {
+                String jsonPart = reply.substring(start + "<<<CLARIFY>>>".length(), end).trim();
+                // На случай если модель всё же обернула JSON в ```-фенсы вопреки инструкции.
+                jsonPart = jsonPart.replaceAll("^```(json)?", "").replaceAll("```$", "").trim();
+                JsonNode clarify = mapper.readTree(jsonPart);
+                if (clarify.has("questions") && clarify.get("questions").isArray() && clarify.get("questions").size() > 0) {
+                    ObjectNode wrapped = mapper.createObjectNode();
+                    wrapped.put("type", "clarify");
+                    wrapped.put("text", clarify.has("text") ? clarify.get("text").asText("") : "");
+                    wrapped.set("questions", clarify.get("questions"));
+                    return mapper.writeValueAsString(wrapped);
+                }
+            }
+        } catch (Exception e) {
+            System.err.println("[wrapChatReply] не удалось распарсить блок CLARIFY, откат на обычный ответ: " + e.getMessage());
+        }
+        ObjectNode wrapped = mapper.createObjectNode();
+        wrapped.put("type", "answer");
+        wrapped.put("text", reply);
+        try {
+            return mapper.writeValueAsString(wrapped);
+        } catch (Exception e) {
+            // Крайний случай — Jackson не смог сериализовать (не должно происходить
+            // для простой строки), возвращаем совсем грубый, но валидный JSON вручную.
+            return "{\"type\":\"answer\",\"text\":" + mapper.valueToTree(reply).toString() + "}";
+        }
+    }
+
     public ResponseEntity<String> plan(@RequestBody PlanRequest request) {
         try {
             int totalDays = request.getDays();

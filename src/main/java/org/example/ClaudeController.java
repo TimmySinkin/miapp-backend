@@ -255,7 +255,17 @@ public class ClaudeController {
         "<<<END>>>\n" +
         "Никогда не смешивай этот блок с обычным markdown-ответом в одном сообщении — либо ты " +
         "задаёшь уточняющий вопрос строго в этом формате и ничего больше, либо даёшь обычный " +
-        "финальный ответ в markdown без этого блока вообще.";
+        "финальный ответ в markdown без этого блока вообще.\n\n" +
+        "КРИТИЧЕСКИ ВАЖНОЕ ОГРАНИЧЕНИЕ ФОРМАТА ОТВЕТА (относится КО ВСЕМ твоим ответам, включая " +
+        "финальные рекомендации, а не только к блоку <<<CLARIFY>>> выше): " +
+        "твой ответ пользователю — это ВСЕГДА либо (а) чистый markdown-текст, либо (б) блок " +
+        "<<<CLARIFY>>>...<<<END>>>, описанный выше, и НИКОГДА ничего третьего. " +
+        "Категорически ЗАПРЕЩЕНО оборачивать финальный ответ в JSON-объект вида " +
+        "{\"role\": \"assistant\", \"message\": \"...\"} или любую другую JSON-структуру с полями " +
+        "role/message/content — это техническая обёртка API, которую видит только сервер, " +
+        "человек должен увидеть просто обычный текст без фигурных скобок и кавычек вокруг всего " +
+        "ответа. Если поймал себя на мысли обернуть ответ в {...} — это ошибка, немедленно " +
+        "перепиши как обычный текст без обёртки.";
 
     private static final String PLAN_SYSTEM_PROMPT =
         "Ты — AI-планировщик задач для календаря приложения MiniApp. " +
@@ -813,7 +823,31 @@ public class ClaudeController {
                 String jsonPart = reply.substring(start + "<<<CLARIFY>>>".length(), end).trim();
                 // На случай если модель всё же обернула JSON в ```-фенсы вопреки инструкции.
                 jsonPart = jsonPart.replaceAll("^```(json)?", "").replaceAll("```$", "").trim();
-                JsonNode clarify = mapper.readTree(jsonPart);
+
+                JsonNode clarify;
+                try {
+                    clarify = mapper.readTree(jsonPart);
+                } catch (Exception parseEx) {
+                    // JSON внутри блока СИНТАКСИЧЕСКИ БИТЫЙ (например, модель забыла
+                    // закрывающую скобку в массиве options — реально наблюдалось).
+                    // Полноценно распарсить нельзя, но можно вытащить хотя бы
+                    // вступительную фразу "text" через regex, не показывая
+                    // пользователю сырой поломанный JSON целиком.
+                    System.err.println("[wrapChatReply] битый JSON в блоке CLARIFY: " + parseEx.getMessage());
+                    java.util.regex.Matcher textMatcher = java.util.regex.Pattern
+                        .compile("\"text\"\\s*:\\s*\"([^\"]*)\"")
+                        .matcher(jsonPart);
+                    String before = reply.substring(0, start).trim();
+                    String salvaged = !before.isEmpty() ? before
+                        : (textMatcher.find() ? textMatcher.group(1) : null);
+                    ObjectNode wrapped = mapper.createObjectNode();
+                    wrapped.put("type", "answer");
+                    wrapped.put("text", salvaged != null && !salvaged.isBlank()
+                        ? salvaged
+                        : "Не получилось сформулировать уточняющий вопрос — переформулируйте, пожалуйста, запрос чуть подробнее.");
+                    return mapper.writeValueAsString(wrapped);
+                }
+
                 if (clarify.has("questions") && clarify.get("questions").isArray() && clarify.get("questions").size() > 0) {
                     ObjectNode wrapped = mapper.createObjectNode();
                     wrapped.put("type", "clarify");
@@ -821,7 +855,7 @@ public class ClaudeController {
                     wrapped.set("questions", clarify.get("questions"));
                     return mapper.writeValueAsString(wrapped);
                 }
-                // Маркер есть, но questions пустой/невалидный — модель, похоже,
+                // Маркер есть, JSON валиден, но questions пустой — модель, похоже,
                 // "запуталась" (например, начала имитировать несуществующий
                 // tool-call текстом после <<<END>>>, как реально случалось).
                 // КРИТИЧЕСКИ ВАЖНО: не откатываемся на весь "reply" целиком —
@@ -842,6 +876,32 @@ public class ClaudeController {
         } catch (Exception e) {
             System.err.println("[wrapChatReply] не удалось распарсить блок CLARIFY, откат на обычный ответ: " + e.getMessage());
         }
+
+        // Защитный парсинг: модель иногда (несмотря на явный запрет в промпте)
+        // оборачивает ВЕСЬ финальный ответ в фейковую JSON-обёртку вида
+        // {"role": "assistant", "message": "..."} — реально наблюдалось на
+        // практике. Если весь reply целиком выглядит как JSON-объект с одним
+        // из типичных полей текста — вытаскиваем из него настоящий текст,
+        // вместо того чтобы показать пользователю сырые фигурные скобки и кавычки.
+        String trimmed = reply.trim();
+        if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
+            try {
+                JsonNode leaked = mapper.readTree(trimmed);
+                for (String field : new String[]{"message", "content", "text", "answer"}) {
+                    if (leaked.has(field) && leaked.get(field).isTextual()) {
+                        ObjectNode wrapped = mapper.createObjectNode();
+                        wrapped.put("type", "answer");
+                        wrapped.put("text", leaked.get(field).asText(""));
+                        System.err.println("[wrapChatReply] обнаружена и распакована фейковая JSON-обёртка ответа (поле \"" + field + "\")");
+                        return mapper.writeValueAsString(wrapped);
+                    }
+                }
+            } catch (Exception ignored) {
+                // Не распарсилось как JSON — значит это просто обычный текст,
+                // в котором совпадением встретились { и } на границах, ничего страшного.
+            }
+        }
+
         ObjectNode wrapped = mapper.createObjectNode();
         wrapped.put("type", "answer");
         wrapped.put("text", reply);

@@ -10,6 +10,12 @@ public class ChatRequest {
     private List<Attachment> attachments;
     private List<HistoryMessage> history;
 
+    // Опциональный флаг "точного режима" — Yandex генерирует черновик,
+    // Groq (через прокси) рецензирует его перед отправкой пользователю.
+    // По умолчанию false: если фронт не передаёт это поле вообще, Jackson
+    // оставит его false и поведение чата не изменится (обычный failover).
+    private boolean ensembleMode;
+
     public String getGoalText() {
         return goalText;
     }
@@ -48,5 +54,13 @@ public class ChatRequest {
 
     public void setHistory(List<HistoryMessage> history) {
         this.history = history;
+    }
+
+    public boolean isEnsembleMode() {
+        return ensembleMode;
+    }
+
+    public void setEnsembleMode(boolean ensembleMode) {
+        this.ensembleMode = ensembleMode;
     }
 }

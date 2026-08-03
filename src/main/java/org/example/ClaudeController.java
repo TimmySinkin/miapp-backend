@@ -3,12 +3,14 @@ package org.example;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 import java.util.Locale;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -58,6 +60,121 @@ public class ClaudeController {
         return "gpt://" + YANDEX_AI_FOLDER_ID + "/" + modelName + "/rc";
     }
     private static final String MODEL_NAME_BASE = "yandexgpt";
+
+    // --- Groq: вторичный провайдер -------------------------------------------------
+    // Yandex остаётся ОСНОВНЫМ провайдером — он стабильно работает с российских IP
+    // без VPN и без риска гео-блокировки по OFAC. Groq подключается только как:
+    //   (а) запасной путь, если Yandex внезапно недоступен (авария в облаке и т.п.);
+    //   (б) опциональный "рецензент" в ensemble-режиме (см. chat()).
+    // Именно поэтому, в отличие от истории миграции выше, здесь НЕ Groq -> Yandex,
+    // а Yandex -> Groq: рискованный обходной путь держим вторичным, а не основным.
+    private static final String GROQ_API_KEY = System.getenv("GROQ_API_KEY");
+    private static final String GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
+    private static final String GROQ_MODEL = "llama-3.3-70b-versatile";
+
+    // Groq геоблокирует российские IP (403), поэтому запросы к нему могут идти
+    // через прокси/VPN с выходом за пределами РФ. Прокси настраивается
+    // ТОЛЬКО для Groq — остальной трафик (Yandex, вебхуки и т.п.) прокси не трогает.
+    // Если GROQ_PROXY_HOST не задан — запросы идут напрямую (пригодится, если
+    // сервер когда-нибудь переедет туда, где Groq доступен без обхода).
+    private final RestTemplate groqRestTemplate = buildGroqRestTemplate();
+
+    // Webshare (и большинство подобных сервисов) выдают HTTP-прокси С АВТОРИЗАЦИЕЙ
+    // (логин/пароль на самом прокси), а не анонимный SOCKS5. Стандартный
+    // java.net.Proxy + SimpleClientHttpRequestFactory такую авторизацию сам не
+    // подставляет (без глобального Authenticator, который задел бы вообще все
+    // HTTP-соединения JVM, включая запросы к Yandex — так делать не стоит).
+    // Поэтому именно для Groq используем Apache HttpClient5 с CredentialsProvider,
+    // ограниченным только этим прокси-хостом — остальной трафик его не видит.
+    private static RestTemplate buildGroqRestTemplate() {
+        String proxyHost = System.getenv("GROQ_PROXY_HOST");
+        String proxyPortEnv = System.getenv("GROQ_PROXY_PORT");
+        String proxyUser = System.getenv("GROQ_PROXY_USER");
+        String proxyPass = System.getenv("GROQ_PROXY_PASS");
+
+        var factory = new org.springframework.http.client.HttpComponentsClientHttpRequestFactory();
+        factory.setConnectTimeout(8_000);
+        // HttpComponentsClientHttpRequestFactory не имеет отдельного read-timeout
+        // сеттера в этой версии Spring — таймаут на чтение ответа задаётся через
+        // requestConfig ниже (responseTimeout), настройки собраны в один клиент.
+
+        if (proxyHost != null && !proxyHost.isBlank() && proxyPortEnv != null && !proxyPortEnv.isBlank()) {
+            int proxyPort = Integer.parseInt(proxyPortEnv.trim());
+            var proxyHttpHost = new org.apache.hc.core5.http.HttpHost("http", proxyHost, proxyPort);
+
+            var credsProvider = new org.apache.hc.client5.http.impl.auth.BasicCredentialsProvider();
+            if (proxyUser != null && !proxyUser.isBlank()) {
+                credsProvider.setCredentials(
+                    new org.apache.hc.client5.http.auth.AuthScope(proxyHttpHost),
+                    new org.apache.hc.client5.http.auth.UsernamePasswordCredentials(
+                        proxyUser, proxyPass == null ? new char[0] : proxyPass.toCharArray())
+                );
+            }
+
+            var requestConfig = org.apache.hc.client5.http.config.RequestConfig.custom()
+                .setConnectionRequestTimeout(org.apache.hc.core5.util.Timeout.ofSeconds(8))
+                .setResponseTimeout(org.apache.hc.core5.util.Timeout.ofSeconds(60))
+                .build();
+
+            var httpClient = org.apache.hc.client5.http.impl.classic.HttpClients.custom()
+                .setProxy(proxyHttpHost)
+                .setDefaultCredentialsProvider(credsProvider)
+                .setDefaultRequestConfig(requestConfig)
+                .build();
+
+            factory.setHttpClient(httpClient);
+        }
+        // Если GROQ_PROXY_HOST не задан — factory работает без прокси (прямое
+        // подключение), пригодится, если сервер когда-нибудь переедет туда,
+        // где Groq доступен без обхода.
+
+        return new RestTemplate(factory);
+    }
+
+    // Небольшой контракт, за которым скрывается разница между провайдерами:
+    // URL, формат заголовков авторизации и то, каким RestTemplate слать запрос
+    // (у Groq — с прокси/своими таймаутами). Сама логика tool-calling цикла
+    // в callOllamaChatWithTools от конкретного провайдера не зависит.
+    private interface AiClient {
+        String name();
+        String endpointUrl();
+        String modelId();
+        HttpHeaders headers();
+        RestTemplate restTemplate();
+    }
+
+    private final AiClient yandexClient = new AiClient() {
+        public String name() { return "yandex"; }
+        public String endpointUrl() { return YANDEX_URL; }
+        public String modelId() { return modelUri(MODEL_NAME_BASE); }
+        public HttpHeaders headers() { return yandexHeaders(); }
+        public RestTemplate restTemplate() { return restTemplate; }
+    };
+
+    private final AiClient groqClient = new AiClient() {
+        public String name() { return "groq"; }
+        public String endpointUrl() { return GROQ_URL; }
+        public String modelId() { return GROQ_MODEL; }
+        public HttpHeaders headers() {
+            if (GROQ_API_KEY == null || GROQ_API_KEY.isBlank()) {
+                throw new IllegalStateException(
+                    "GROQ_API_KEY не задан — Groq недоступен как резервный провайдер.");
+            }
+            HttpHeaders h = new HttpHeaders();
+            h.setContentType(MediaType.APPLICATION_JSON);
+            h.set("Authorization", "Bearer " + GROQ_API_KEY);
+            return h;
+        }
+        public RestTemplate restTemplate() { return groqRestTemplate; }
+    };
+
+    // Простейший circuit breaker без внешних зависимостей: если Yandex подряд
+    // несколько раз падает, следующие N секунд сразу идём в Groq, не тратя
+    // время на заведомо провальную попытку и ожидание таймаута каждый раз.
+    private final AtomicInteger yandexFailStreak = new AtomicInteger(0);
+    private volatile long yandexRetryAfterMs = 0;
+    private static final int FAIL_STREAK_THRESHOLD = 3;
+    private static final long BREAKER_COOLDOWN_MS = 30_000;
     // Явного подтверждения поддержки vision (картинок) через OpenAI-совместимый
     // endpoint YandexGPT на момент миграции найдено не было — используем ту же
     // текстовую модель для vision-запросов как временное решение. Если Yandex
@@ -317,6 +434,7 @@ public class ClaudeController {
     // по ходу диалога, нужен ли ей web_search, и может вызвать его несколько
     // раз подряд, прежде чем дать финальный текстовый ответ.
     private String callOllamaChatWithTools(
+        AiClient client,
         String systemPrompt,
         String userMessage,
         String historyText,
@@ -350,7 +468,7 @@ public class ClaudeController {
         int maxIterations = 4; // защита от зацикливания, если модель бесконечно зовёт инструмент
         for (int iter = 0; iter < maxIterations; iter++) {
             ObjectNode body = mapper.createObjectNode();
-            body.put("model", modelUri(MODEL_NAME_BASE));
+            body.put("model", client.modelId());
             body.put("stream", false);
             // Понижено с 0.7 до 0.4 — при более высокой температуре YandexGPT
             // чаще уходил в общие рекомендации без конкретики или спрашивал
@@ -369,10 +487,10 @@ public class ClaudeController {
             body.set("messages", messagesArray);
             if (toolsArray != null) body.set("tools", toolsArray);
 
-            HttpEntity<String> entity = new HttpEntity<>(body.toString(), yandexHeaders());
+            HttpEntity<String> entity = new HttpEntity<>(body.toString(), client.headers());
 
-            ResponseEntity<String> response = restTemplate.exchange(
-                YANDEX_URL,
+            ResponseEntity<String> response = client.restTemplate().exchange(
+                client.endpointUrl(),
                 HttpMethod.POST,
                 entity,
                 String.class
@@ -441,6 +559,86 @@ public class ClaudeController {
         return "Не удалось получить ответ после нескольких попыток вызова инструментов.";
     }
 
+    // Сценарий 1 — failover: Yandex основной, Groq подключается только если
+    // Yandex реально недоступен. Circuit breaker не даёт на каждый запрос
+    // повторно ждать таймаут Yandex, если он уже несколько раз подряд упал —
+    // следующие BREAKER_COOLDOWN_MS сразу идём в Groq.
+    private String chatWithFailover(
+        String systemPrompt, String userMessage, String historyText, boolean withTools
+    ) throws Exception {
+        boolean breakerOpen = System.currentTimeMillis() < yandexRetryAfterMs;
+        if (!breakerOpen) {
+            try {
+                String result = callOllamaChatWithTools(yandexClient, systemPrompt, userMessage, historyText, withTools);
+                yandexFailStreak.set(0);
+                return result;
+            } catch (Exception e) {
+                int streak = yandexFailStreak.incrementAndGet();
+                System.err.println("Yandex вызов #" + streak + " подряд неудачен: " + e.getMessage());
+                if (streak >= FAIL_STREAK_THRESHOLD) {
+                    yandexRetryAfterMs = System.currentTimeMillis() + BREAKER_COOLDOWN_MS;
+                    System.err.println("Circuit breaker открыт на Yandex на " + BREAKER_COOLDOWN_MS + " мс, переключаемся на Groq");
+                }
+                // сразу пробуем Groq в этом же запросе, не заставляя пользователя ждать ретрая
+            }
+        }
+        return callOllamaChatWithTools(groqClient, systemPrompt, userMessage, historyText, withTools);
+    }
+
+    // Сценарий 2 — ensemble ("черновик + рецензия"): Yandex быстро генерирует
+    // черновик, Groq проверяет его на фактические/логические огрехи и может
+    // подправить. Рецензия — best-effort: любая ошибка Groq (в т.ч. геоблок
+    // без прокси) тихо откатывается на исходный черновик, а не роняет ответ.
+    private String chatWithEnsemble(
+        String systemPrompt, String userMessage, String historyText, boolean withTools
+    ) throws Exception {
+        String draft = callOllamaChatWithTools(yandexClient, systemPrompt, userMessage, historyText, withTools);
+        try {
+            String reviewPrompt =
+                "Ниже вопрос пользователя и черновик ответа от другой модели. Проверь черновик на " +
+                "фактические и логические ошибки. Если он в целом верный — верни его как есть, " +
+                "лишь слегка улучшив формулировки. Если нашёл ошибку — исправь именно её, не переписывая " +
+                "всё заново и не меняя структуру/объём без необходимости.\n\n" +
+                "Вопрос пользователя: " + userMessage + "\n\nЧерновик ответа:\n" + draft;
+            return callOllamaChatWithTools(groqClient, systemPrompt, reviewPrompt, null, false);
+        } catch (Exception e) {
+            System.err.println("Groq-рецензия недоступна (" + e.getMessage() + "), отдаём черновик от Yandex как есть");
+            return draft;
+        }
+    }
+
+    // Лёгкий health-check для Groq: реальный минимальный запрос через тот же
+    // groqClient (и, если задан, тот же прокси), что используется в failover/
+    // ensemble. Не трогает Yandex и не влияет на основной чат — только диагностика.
+    // Пароль прокси в ответ не попадает, только сам факт "прокси настроен".
+    @GetMapping("/groq-status")
+    public ResponseEntity<String> groqStatus() {
+        String proxyHost = System.getenv("GROQ_PROXY_HOST");
+        boolean proxyConfigured = proxyHost != null && !proxyHost.isBlank();
+        long start = System.currentTimeMillis();
+        ObjectNode result = mapper.createObjectNode();
+        result.put("provider", "groq");
+        result.put("proxyConfigured", proxyConfigured);
+        if (proxyConfigured) {
+            result.put("proxyHost", proxyHost);
+        }
+        try {
+            String reply = callOllamaChatWithTools(
+                groqClient, "Отвечай одним словом, без пояснений.", "Скажи слово: ok", null, false
+            );
+            result.put("status", "ok");
+            result.put("latencyMs", System.currentTimeMillis() - start);
+            result.put("sampleReply", reply.length() > 50 ? reply.substring(0, 50) : reply);
+            return ResponseEntity.ok(result.toString());
+        } catch (Exception e) {
+            result.put("status", "down");
+            result.put("latencyMs", System.currentTimeMillis() - start);
+            result.put("error", e.getMessage());
+            e.printStackTrace();
+            return ResponseEntity.status(503).body(result.toString());
+        }
+    }
+
     @PostMapping("/chat")
     public ResponseEntity<String> chat(@RequestBody ChatRequest request) {
         try {
@@ -497,14 +695,20 @@ public class ClaudeController {
                 // Файловый сценарий: фокус на содержимом вложения, инструмент
                 // web_search тут не нужен и мог бы отвлекать модель от файла.
                 String systemPrompt = FILE_SYSTEM_PROMPT.replace("%LANGUAGE_RULE%", languageRule) + topicLock;
-                reply = callOllamaChatWithTools(systemPrompt, userMessage.toString(), historyText, false);
+                reply = chatWithFailover(systemPrompt, userMessage.toString(), historyText, false);
             } else {
                 // Обычный текстовый сценарий (включая "фильмы") — с инструментом
                 // web_search. Модель САМА решает, вызывать его или нет,
                 // ориентируясь на описание инструмента и системный промпт,
                 // а не по жёсткому списку ключевых слов в Java-коде.
                 String systemPrompt = CHAT_SYSTEM_PROMPT.replace("%LANGUAGE_RULE%", languageRule) + topicLock;
-                reply = callOllamaChatWithTools(systemPrompt, userMessage.toString(), historyText, true);
+                // ensembleMode — новое опциональное поле в ChatRequest (Boolean/boolean,
+                // default false); фронт включает его отдельным тумблером "Точный режим",
+                // т.к. это удваивает время ответа. Пока поле не добавлено на фронте/DTO,
+                // request.isEnsembleMode() всегда вернёт false и поведение не меняется.
+                reply = request.isEnsembleMode()
+                    ? chatWithEnsemble(systemPrompt, userMessage.toString(), historyText, true)
+                    : chatWithFailover(systemPrompt, userMessage.toString(), historyText, true);
             }
 
             return ResponseEntity.ok(reply);

@@ -56,6 +56,20 @@ public class ChatRequest {
         this.history = history;
     }
 
+    // true, если в этом чате УЖЕ был хотя бы один раунд уточняющих вопросов
+    // (см. clarify-контракт в /chat) — фронт вычисляет это по истории сам
+    // и передаёт явно, чтобы бэкенд мог ДЕТЕРМИНИРОВАННО запретить второй
+    // раунд, не полагаясь на то, что модель сама "не забудет" это правило.
+    private boolean clarifyUsed;
+
+    public boolean isClarifyUsed() {
+        return clarifyUsed;
+    }
+
+    public void setClarifyUsed(boolean clarifyUsed) {
+        this.clarifyUsed = clarifyUsed;
+    }
+
     public boolean isEnsembleMode() {
         return ensembleMode;
     }

@@ -342,27 +342,35 @@ public class ClaudeController {
     // это "исполнитель" инструмента web_search, который модель вызывает сама через tool calling.
     private String webSearch(String query) {
         try {
-            String encoded = java.net.URLEncoder.encode(query, "UTF-8");
             java.net.http.HttpClient client = java.net.http.HttpClient.newBuilder()
                 .connectTimeout(java.time.Duration.ofSeconds(5))
                 .build();
+            // ВАЖНО: DuckDuckGo Lite отдаёт реальные результаты только на POST
+            // (см. <form action="/lite/" method="post"> в их собственной разметке).
+            // GET-запрос с ?q=... в URL возвращает пустую страницу с одной лишь
+            // формой поиска — никаких result-link/result-snippet там нет, поэтому
+            // раньше поиск молча "не находил" вообще ничего, при любом запросе.
+            String body = "q=" + java.net.URLEncoder.encode(query, "UTF-8");
             java.net.http.HttpRequest req = java.net.http.HttpRequest.newBuilder()
-                .uri(java.net.URI.create("https://lite.duckduckgo.com/lite/?q=" + encoded))
+                .uri(java.net.URI.create("https://lite.duckduckgo.com/lite/"))
                 .header("User-Agent", "Mozilla/5.0")
+                .header("Content-Type", "application/x-www-form-urlencoded")
                 .timeout(java.time.Duration.ofSeconds(6))
-                .GET()
+                .POST(java.net.http.HttpRequest.BodyPublishers.ofString(body))
                 .build();
             java.net.http.HttpResponse<String> resp = client.send(req, java.net.http.HttpResponse.BodyHandlers.ofString());
             String html = resp.body();
 
             // Грубый, но зависимостей не требующий парсинг HTML lite-версии DDG:
             // строки результатов вида <a class="result-link" href="...">Заголовок</a>
-            // и рядом <td class="result-snippet">Сниппет</td>.
+            // и рядом <td class="result-snippet">Сниппет</td>. class=["']? — на
+            // случай, если DDG иногда отдаёт class=result-link' без открывающей
+            // кавычки (реально встречалось в ответах), чтобы не терять такие строки.
             java.util.regex.Matcher linkMatcher = java.util.regex.Pattern
-                .compile("class=\"result-link\"[^>]*href=\"([^\"]+)\"[^>]*>(.*?)</a>", java.util.regex.Pattern.DOTALL)
+                .compile("class=[\"']?result-link[\"']?[^>]*href=\"([^\"]+)\"[^>]*>(.*?)</a>", java.util.regex.Pattern.DOTALL)
                 .matcher(html);
             java.util.regex.Matcher snippetMatcher = java.util.regex.Pattern
-                .compile("class=\"result-snippet\"[^>]*>(.*?)</td>", java.util.regex.Pattern.DOTALL)
+                .compile("class=[\"']?result-snippet[\"']?[^>]*>(.*?)</td>", java.util.regex.Pattern.DOTALL)
                 .matcher(html);
 
             java.util.List<String> links = new java.util.ArrayList<>();

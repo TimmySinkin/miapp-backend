@@ -510,6 +510,7 @@ public class ClaudeController {
             JsonNode toolCalls = message != null ? message.get("tool_calls") : null;
 
             if (toolCalls != null && toolCalls.isArray() && toolCalls.size() > 0) {
+                System.out.println("[" + client.name() + "] модель запросила " + toolCalls.size() + " вызов(ов) инструмента(ов), итерация " + iter);
                 // Модель попросила вызвать инструмент(ы) — добавляем её сообщение
                 // с tool_calls в историю и выполняем каждый вызов реально.
                 ObjectNode assistantMsg = mapper.createObjectNode();
@@ -546,9 +547,12 @@ public class ClaudeController {
                         }
                     }
 
+                    System.out.println("[tool_call] name=" + name + " query=\"" + query + "\"");
                     String result = "web_search".equals(name)
                         ? webSearch(query)
                         : "(неизвестный инструмент: " + name + ")";
+                    System.out.println("[tool_result] длина=" + result.length() + " превью=" +
+                        result.substring(0, Math.min(200, result.length())).replace("\n", " | "));
 
                     ObjectNode toolMsg = mapper.createObjectNode();
                     toolMsg.put("role", "tool");
@@ -560,6 +564,9 @@ public class ClaudeController {
             }
 
             // Нет вызовов инструментов — это финальный текстовый ответ
+            if (withTools) {
+                System.out.println("[" + client.name() + "] модель НЕ вызвала ни одного инструмента, ответила сразу (итерация " + iter + ")");
+            }
             return message != null && message.has("content") && !message.get("content").isNull()
                 ? message.get("content").asText("") : "";
         }

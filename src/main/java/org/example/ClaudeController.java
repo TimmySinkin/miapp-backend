@@ -360,6 +360,9 @@ public class ClaudeController {
                 .build();
             java.net.http.HttpResponse<String> resp = client.send(req, java.net.http.HttpResponse.BodyHandlers.ofString());
             String html = resp.body();
+            System.out.println("[webSearch] HTTP status=" + resp.statusCode() + " длина тела=" + html.length());
+            System.out.println("[webSearch] превью тела: " +
+                html.substring(0, Math.min(500, html.length())).replace("\n", " | "));
 
             // Грубый, но зависимостей не требующий парсинг HTML lite-версии DDG:
             // строки результатов вида <a class="result-link" href="...">Заголовок</a>

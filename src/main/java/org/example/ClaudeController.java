@@ -72,6 +72,19 @@ public class ClaudeController {
     private static final String GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
     private static final String GROQ_MODEL = "llama-3.3-70b-versatile";
 
+    // YandexGPT (chat/completions) НЕ поддерживает vision — это чисто текстовая
+    // модель, она молча игнорирует image_url в content и модель честно отвечает
+    // "не вижу картинку". Поэтому запросы с картинками идут отдельно через Groq
+    // на мультимодальную модель. Groq довольно часто меняет/депрекейтит модели
+    // (в т.ч. деприкейтил сам GROQ_MODEL выше), поэтому имя вынесено в env —
+    // при очередном депрекейшне достаточно поменять переменную на сервере,
+    // не пересобирая бэкенд. Актуальный список vision-моделей смотрите в
+    // https://console.groq.com/docs/models (фильтр по image input).
+    private static final String GROQ_VISION_MODEL =
+        System.getenv("GROQ_VISION_MODEL") != null && !System.getenv("GROQ_VISION_MODEL").isBlank()
+            ? System.getenv("GROQ_VISION_MODEL")
+            : "meta-llama/llama-4-scout-17b-16e-instruct";
+
     // Groq геоблокирует российские IP (403), поэтому запросы к нему могут идти
     // через прокси/VPN с выходом за пределами РФ. Прокси настраивается
     // ТОЛЬКО для Groq — остальной трафик (Yandex, вебхуки и т.п.) прокси не трогает.
@@ -175,13 +188,8 @@ public class ClaudeController {
     private volatile long yandexRetryAfterMs = 0;
     private static final int FAIL_STREAK_THRESHOLD = 3;
     private static final long BREAKER_COOLDOWN_MS = 30_000;
-    // Явного подтверждения поддержки vision (картинок) через OpenAI-совместимый
-    // endpoint YandexGPT на момент миграции найдено не было — используем ту же
-    // текстовую модель для vision-запросов как временное решение. Если Yandex
-    // не примет image_url в content, здесь нужно будет вернуть отдельную
-    // vision-модель, когда Yandex явно её анонсирует (или переключить этот путь
-    // обратно на Groq / другого провайдера только для запросов с картинками).
-    private static final String VISION_MODEL_NAME_BASE = "yandexgpt";
+    // Подтверждено (см. GROQ_VISION_MODEL ниже): YandexGPT chat/completions
+    // vision не поддерживает вообще — картинки идут через Groq, не через Yandex.
 
     private static final String CHAT_SYSTEM_PROMPT =
         "Ты — AI-ассистент в приложении-органайзере MiniApp. " +
@@ -1191,15 +1199,43 @@ public class ClaudeController {
         messages.add(userMsg);
 
         ObjectNode body = mapper.createObjectNode();
-        body.put("model", modelUri(hasImages ? VISION_MODEL_NAME_BASE : MODEL_NAME_BASE));
         body.set("messages", messages);
         body.put("temperature", temperature);
         body.put("stream", false);
 
-        HttpEntity<String> entity = new HttpEntity<>(body.toString(), yandexHeaders());
+        // Картинки — только через Groq: YandexGPT chat/completions вообще
+        // не умеет vision (см. комментарий у GROQ_VISION_MODEL выше), поэтому
+        // при hasImages сюда даже не заходим с моделью Yandex — иначе модель
+        // молча "не видит" картинку и отвечает так, будто её не было.
+        String providerName;
+        String url;
+        HttpHeaders headers;
+        RestTemplate httpClient;
+        if (hasImages) {
+            if (GROQ_API_KEY == null || GROQ_API_KEY.isBlank()) {
+                throw new IllegalStateException(
+                    "GROQ_API_KEY не задан. Для распознавания изображений запросы идут через Groq " +
+                    "(YandexGPT vision не поддерживает) — установите переменную окружения GROQ_API_KEY на сервере.");
+            }
+            body.put("model", GROQ_VISION_MODEL);
+            providerName = "groq-vision";
+            url = GROQ_URL;
+            headers = new HttpHeaders();
+            headers.setContentType(MediaType.APPLICATION_JSON);
+            headers.set("Authorization", "Bearer " + GROQ_API_KEY);
+            httpClient = groqRestTemplate;
+        } else {
+            body.put("model", modelUri(MODEL_NAME_BASE));
+            providerName = "yandex";
+            url = YANDEX_URL;
+            headers = yandexHeaders();
+            httpClient = restTemplate;
+        }
 
-        ResponseEntity<String> response = restTemplate.exchange(
-            YANDEX_URL,
+        HttpEntity<String> entity = new HttpEntity<>(body.toString(), headers);
+
+        ResponseEntity<String> response = httpClient.exchange(
+            url,
             HttpMethod.POST,
             entity,
             String.class
@@ -1208,7 +1244,7 @@ public class ClaudeController {
         JsonNode json = mapper.readTree(response.getBody());
         JsonNode choices = json.get("choices");
         if (choices == null || choices.size() == 0) {
-            throw new IllegalStateException("YandexGPT не вернул ни одного варианта ответа");
+            throw new IllegalStateException("[" + providerName + "] не вернул ни одного варианта ответа");
         }
         JsonNode message = choices.get(0).get("message");
         return message != null && message.has("content") ? message.get("content").asText("") : "";

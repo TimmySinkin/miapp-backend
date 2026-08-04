@@ -922,6 +922,7 @@ public class ClaudeController {
         }
     }
 
+    @PostMapping("/plan")
     public ResponseEntity<String> plan(@RequestBody PlanRequest request) {
         try {
             int totalDays = request.getDays();

@@ -841,7 +841,14 @@ public class ClaudeController {
     // решила сначала уточнить детали (см. блок <<<CLARIFY>>>...<<<END>>> в
     // системном промпте). Любая ошибка парсинга — безопасный откат на
     // обычный текстовый ответ, чтобы битый JSON от модели не ронял чат.
-    private String wrapChatReply(String reply) {
+    private String wrapChatReply(String rawReply) {
+        // Некоторые модели (например, qwen3.6-27b, используемая для vision-
+        // запросов через Groq) по умолчанию включают "рассуждение вслух" прямо
+        // в content ответа, обёрнутое в <think>...</think> — это внутренний
+        // черновик модели, пользователь не должен его видеть, только финальный
+        // текст после этого блока. Режем это ДО любой другой обработки,
+        // универсально для всех моделей/провайдеров.
+        String reply = rawReply.replaceAll("(?s)<think>.*?</think>", "").trim();
         try {
             int start = reply.indexOf("<<<CLARIFY>>>");
             int end = reply.indexOf("<<<END>>>");

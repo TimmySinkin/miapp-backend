@@ -381,9 +381,27 @@ public class ClaudeController {
         StringBuilder sb = new StringBuilder();
         for (int i = from; i < history.size(); i++) {
             HistoryMessage m = history.get(i);
-            if (m.getText() == null || m.getText().isBlank()) continue;
+            // Собираем текст реплики + содержимое текстовых вложений этого хода
+            // (если были) — раньше сюда попадал только m.getText(), и файл,
+            // прикреплённый на предыдущем ходу, полностью терялся для модели
+            // уже на следующем сообщении ("что там написано?" -> "предоставьте файл").
+            StringBuilder turnText = new StringBuilder();
+            if (m.getText() != null && !m.getText().isBlank()) {
+                turnText.append(m.getText());
+            }
+            if (m.getAttachments() != null) {
+                for (Attachment att : m.getAttachments()) {
+                    if ("text".equals(att.getType()) && att.getContent() != null) {
+                        turnText.append("\n\n[Прикреплённый файл \"")
+                            .append(att.getName())
+                            .append("\"]:\n")
+                            .append(att.getContent());
+                    }
+                }
+            }
+            if (turnText.length() == 0) continue;
             String speaker = "user".equals(m.getRole()) ? "Пользователь" : "Ассистент";
-            sb.append(speaker).append(": ").append(m.getText()).append("\n\n");
+            sb.append(speaker).append(": ").append(turnText).append("\n\n");
         }
         return sb.length() > 0 ? sb.toString().trim() : null;
     }
@@ -399,7 +417,13 @@ public class ClaudeController {
         "- Если просят найти/извлечь что-то конкретное — процитируй только нужный фрагмент (коротко)\n" +
         "- Если вопрос не связан с содержимым файла — отвечай как обычно, файл не мешает\n" +
         "- Если файлов несколько — разбирай их по отдельности, не смешивая контекст\n" +
-        "- Используй Markdown: заголовки, списки, выделение ключевых моментов **жирным**";
+        "- Используй Markdown: заголовки, списки, выделение ключевых моментов **жирным**\n\n" +
+        "КРИТИЧЕСКИ ВАЖНО: содержимое файла УЖЕ ЕСТЬ в этом сообщении — НИКОГДА не проси " +
+        "пользователя предоставить файл или его содержимое, оно уже перед тобой. " +
+        "Если формулировка расплывчатая (\"прочти документ\", \"что там написано\", \"глянь файл\" " +
+        "и т.п. без уточнения желаемого действия) — НЕ переспрашивай, что именно сделать. Сразу дай " +
+        "краткое содержательное summary файла (о чём он, ключевые пункты/факты) — это разумное " +
+        "действие по умолчанию для любого расплывчатого запроса о файле.";
 
     // Простой веб-поиск без API-ключа через HTML-версию DuckDuckGo (lite).
     // Возвращает текстовый блок с топ-результатами (заголовок + сниппет + ссылка) —

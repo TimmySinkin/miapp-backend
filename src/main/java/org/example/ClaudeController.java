@@ -70,20 +70,30 @@ public class ClaudeController {
     // а Yandex -> Groq: рискованный обходной путь держим вторичным, а не основным.
     private static final String GROQ_API_KEY = System.getenv("GROQ_API_KEY");
     private static final String GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
-    private static final String GROQ_MODEL = "llama-3.3-70b-versatile";
+    // ВАЖНО: "llama-3.3-70b-versatile" депрекейтен Groq (анонс 17 июня 2026,
+    // официальная рекомендация — переезжать на openai/gpt-oss-120b или
+    // qwen/qwen3.6-27b, см. https://console.groq.com/docs/deprecations).
+    // Как и с vision-моделью ниже, вынесено в env — при очередном депрекейшне
+    // достаточно поменять GROQ_MODEL на сервере, не пересобирая бэкенд.
+    private static final String GROQ_MODEL =
+        System.getenv("GROQ_MODEL") != null && !System.getenv("GROQ_MODEL").isBlank()
+            ? System.getenv("GROQ_MODEL")
+            : "openai/gpt-oss-120b";
 
     // YandexGPT (chat/completions) НЕ поддерживает vision — это чисто текстовая
     // модель, она молча игнорирует image_url в content и модель честно отвечает
     // "не вижу картинку". Поэтому запросы с картинками идут отдельно через Groq
     // на мультимодальную модель. Groq довольно часто меняет/депрекейтит модели
-    // (в т.ч. деприкейтил сам GROQ_MODEL выше), поэтому имя вынесено в env —
-    // при очередном депрекейшне достаточно поменять переменную на сервере,
-    // не пересобирая бэкенд. Актуальный список vision-моделей смотрите в
-    // https://console.groq.com/docs/models (фильтр по image input).
+    // (в т.ч. депрекейтил "meta-llama/llama-4-scout-17b-16e-instruct", который
+    // раньше стоял тут по умолчанию, — официальная замена: qwen/qwen3.6-27b,
+    // мультимодальная модель с поддержкой изображений), поэтому имя вынесено
+    // в env — при очередном депрекейшне достаточно поменять переменную на
+    // сервере, не пересобирая бэкенд. Актуальный список vision-моделей смотрите
+    // в https://console.groq.com/docs/vision и https://console.groq.com/docs/deprecations.
     private static final String GROQ_VISION_MODEL =
         System.getenv("GROQ_VISION_MODEL") != null && !System.getenv("GROQ_VISION_MODEL").isBlank()
             ? System.getenv("GROQ_VISION_MODEL")
-            : "meta-llama/llama-4-scout-17b-16e-instruct";
+            : "qwen/qwen3.6-27b";
 
     // Groq геоблокирует российские IP (403), поэтому запросы к нему могут идти
     // через прокси/VPN с выходом за пределами РФ. Прокси настраивается

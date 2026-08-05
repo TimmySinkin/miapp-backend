@@ -55,10 +55,13 @@ public class StatsController {
         stats.put("activeDays", activeDays);
 
         // Самый активный месяц
+        // Группируем по (год, месяц) вместе, а не только по месяцу — иначе
+        // "Август" за 2025 и 2026 годы схлопнутся в одну группу и результат
+        // будет врать, как только у пользователя накопятся данные за второй год.
         List<Map<String, Object>> bestMonth = jdbc.queryForList(
-            "SELECT EXTRACT(MONTH FROM date::date) as month, COUNT(*) as total " +
+            "SELECT EXTRACT(YEAR FROM date::date) as year, EXTRACT(MONTH FROM date::date) as month, COUNT(*) as total " +
             "FROM day_tasks WHERE login = ? " +
-            "GROUP BY month ORDER BY total DESC LIMIT 1",
+            "GROUP BY year, month ORDER BY total DESC LIMIT 1",
             login);
         stats.put("bestMonth", bestMonth.isEmpty() ? null : bestMonth.get(0));
 

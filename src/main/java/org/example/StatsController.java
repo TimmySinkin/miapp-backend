@@ -21,6 +21,14 @@ public class StatsController {
     public ResponseEntity<Map<String, Object>> getStats(@PathVariable String login) {
         Map<String, Object> stats = new HashMap<>();
 
+        // Текущие год/месяц по времени сервера — фронт использовал new Date()
+        // (локальное время браузера) для выбора "текущего месяца" из monthly[],
+        // что могло разъезжаться с тем, что реально агрегировано на бэке
+        // в приграничные часы месяца при разнице часовых поясов.
+        LocalDate serverNow = LocalDate.now();
+        stats.put("currentYear", serverNow.getYear());
+        stats.put("currentMonth", serverNow.getMonthValue());
+
         // Задачи по месяцам — сколько задач и сколько выполнено
         List<Map<String, Object>> monthly = jdbc.queryForList(
             "SELECT " +

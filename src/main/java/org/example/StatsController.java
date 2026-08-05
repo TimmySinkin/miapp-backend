@@ -72,6 +72,17 @@ public class StatsController {
             login);
         stats.put("topActions", topActions);
 
+        // Топ-5 действий ЗА ТЕКУЩИЙ ГОД — отдельно от topActions (тот — за всё время).
+        // Нужно для годового отчёта (см. StatsReport): "топ действий за год" — это не то
+        // же самое, что "топ действий за всё время", особенно у пользователей, которые
+        // сменили фокус (например, с английского языка на программирование).
+        List<Map<String, Object>> topActionsYear = jdbc.queryForList(
+            "SELECT text, SUM(COALESCE(progress, 0)) as count FROM day_tasks " +
+            "WHERE login = ? AND EXTRACT(YEAR FROM date::date) = ? " +
+            "GROUP BY text ORDER BY count DESC LIMIT 5",
+            login, LocalDate.now().getYear());
+        stats.put("topActionsYear", topActionsYear);
+
         // ─── Сырые записи для weekly / distribution ───
         // Тянем всё разом одним запросом и агрегируем в Java —
         // так проще собрать "неделя по понедельникам" и "месяц по категориям",

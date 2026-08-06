@@ -877,30 +877,60 @@ public class ClaudeController {
             }
 
             String reply;
+            String systemPromptUsed;
             if (hasImages) {
                 // Vision-запросы остаются на старом простом /api/generate —
                 // qwen2.5vl не даёт надёжного tool calling, а картинка+интернет-поиск
                 // одновременно почти никогда не нужны в этом приложении.
-                String systemPrompt = CHAT_SYSTEM_PROMPT.replace("%LANGUAGE_RULE%", languageRule) + topicLock;
-                reply = callOllama(systemPrompt, userMessage.toString(), 0.7, images, languageRule, historyText);
+                systemPromptUsed = CHAT_SYSTEM_PROMPT.replace("%LANGUAGE_RULE%", languageRule) + topicLock;
+                reply = callOllama(systemPromptUsed, userMessage.toString(), 0.7, images, languageRule, historyText);
             } else if (hasTextAttachment) {
                 // Файловый сценарий: фокус на содержимом вложения, инструмент
                 // web_search тут не нужен и мог бы отвлекать модель от файла.
-                String systemPrompt = FILE_SYSTEM_PROMPT.replace("%LANGUAGE_RULE%", languageRule) + topicLock;
-                reply = chatWithFailover(systemPrompt, userMessage.toString(), historyText, false);
+                systemPromptUsed = FILE_SYSTEM_PROMPT.replace("%LANGUAGE_RULE%", languageRule) + topicLock;
+                reply = chatWithFailover(systemPromptUsed, userMessage.toString(), historyText, false);
             } else {
                 // Обычный текстовый сценарий (включая "фильмы") — с инструментом
                 // web_search. Модель САМА решает, вызывать его или нет,
                 // ориентируясь на описание инструмента и системный промпт,
                 // а не по жёсткому списку ключевых слов в Java-коде.
-                String systemPrompt = CHAT_SYSTEM_PROMPT.replace("%LANGUAGE_RULE%", languageRule) + topicLock;
+                systemPromptUsed = CHAT_SYSTEM_PROMPT.replace("%LANGUAGE_RULE%", languageRule) + topicLock;
                 // ensembleMode — новое опциональное поле в ChatRequest (Boolean/boolean,
                 // default false); фронт включает его отдельным тумблером "Точный режим",
                 // т.к. это удваивает время ответа. Пока поле не добавлено на фронте/DTO,
                 // request.isEnsembleMode() всегда вернёт false и поведение не меняется.
                 reply = request.isEnsembleMode()
-                    ? chatWithEnsemble(systemPrompt, userMessage.toString(), historyText, true)
-                    : chatWithFailover(systemPrompt, userMessage.toString(), historyText, true);
+                    ? chatWithEnsemble(systemPromptUsed, userMessage.toString(), historyText, true)
+                    : chatWithFailover(systemPromptUsed, userMessage.toString(), historyText, true);
+            }
+
+            // Модель иногда (реально наблюдалось — YandexGPT и локальная Ollama
+            // обе) кладёт в блок <<<CLARIFY>>> синтаксически битый или пустой
+            // JSON (пропущенная запятая/скобка, пустой questions). Без ретрая
+            // пользователь получал вводную фразу без единого вопроса и без
+            // кнопок — молчаливый откат на wrapChatReply это скрывал, выглядело
+            // как "ничего не произошло". Делаем ОДИН ретрай с явным указанием
+            // модели на конкретную её ошибку, прежде чем сдаваться.
+            if (isMalformedClarifyBlock(reply)) {
+                System.err.println("[chat] обнаружен битый/пустой CLARIFY-блок, делаем один ретрай с корректировкой");
+                try {
+                    String correctionNote = "\n\n[СИСТЕМНОЕ ПРИМЕЧАНИЕ ДЛЯ ТЕБЯ: твой предыдущий ответ на это же " +
+                        "сообщение содержал СИНТАКСИЧЕСКИ НЕКОРРЕКТНЫЙ или ПУСТОЙ JSON внутри блока " +
+                        "<<<CLARIFY>>>...<<<END>>> (например, пропущена запятая, скобка, или questions оказался " +
+                        "пустым массивом). Ответь СНОВА на исходное сообщение пользователя тем же по смыслу " +
+                        "уточняющим вопросом(ами), но верни СТРОГО валидный JSON без единой синтаксической ошибки. " +
+                        "Если не уверен, что сможешь собрать валидный JSON — просто пропусти уточнение и сразу " +
+                        "дай финальный содержательный ответ по существу, без блока CLARIFY вообще.]";
+                    String retryMessage = userMessage.toString() + correctionNote;
+                    reply = hasImages
+                        ? callOllama(systemPromptUsed, retryMessage, 0.7, images, languageRule, historyText)
+                        : (request.isEnsembleMode()
+                            ? chatWithEnsemble(systemPromptUsed, retryMessage, historyText, !hasTextAttachment)
+                            : chatWithFailover(systemPromptUsed, retryMessage, historyText, !hasTextAttachment));
+                } catch (Exception retryEx) {
+                    System.err.println("[chat] ретрай тоже не удался: " + retryEx.getMessage());
+                    // reply остаётся прежним (битым) — wrapChatReply сделает безопасный откат как раньше
+                }
             }
 
             return ResponseEntity.ok(wrapChatReply(reply));
@@ -925,6 +955,26 @@ public class ClaudeController {
 
     private String stripDateFromDayColumn(String text) {
         return DAY_COLUMN_DATE_PATTERN.matcher(text).replaceAll("|$1$2");
+    }
+
+    // Лёгкая проверка "похоже ли на битый CLARIFY-блок", используется в chat()
+    // ДО основного разбора в wrapChatReply, чтобы решить, нужен ли ретрай.
+    // Логика разбора намеренно продублирована в упрощённом виде (не вызывает
+    // wrapChatReply напрямую) — там разбор сразу строит финальный JSON-ответ
+    // для фронта, а здесь нужен только булев вердикт "перезапрашивать или нет".
+    private boolean isMalformedClarifyBlock(String rawReply) {
+        String cleaned = rawReply.replaceAll("(?s)<think>.*?</think>", "").trim();
+        int start = cleaned.indexOf("<<<CLARIFY>>>");
+        int end = cleaned.indexOf("<<<END>>>");
+        if (start < 0 || end <= start) return false; // блока вообще нет — это обычный ответ, всё в порядке
+        String jsonPart = cleaned.substring(start + "<<<CLARIFY>>>".length(), end).trim();
+        jsonPart = jsonPart.replaceAll("^```(json)?", "").replaceAll("```$", "").trim();
+        try {
+            JsonNode node = mapper.readTree(jsonPart);
+            return !(node.has("questions") && node.get("questions").isArray() && node.get("questions").size() > 0);
+        } catch (Exception e) {
+            return true; // синтаксически битый JSON
+        }
     }
 
     // Превращает сырой ответ модели в JSON-контракт для фронта: либо

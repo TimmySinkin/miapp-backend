@@ -1062,13 +1062,15 @@ public class ClaudeController {
         // Защитный парсинг: модель иногда (несмотря на явный запрет в промпте)
         // оборачивает ВЕСЬ финальный ответ в фейковую JSON-обёртку вида
         // {"role": "assistant", "message": "..."} — реально наблюдалось на
-        // практике. Если весь reply целиком выглядит как JSON-объект с одним
-        // из типичных полей текста — вытаскиваем из него настоящий текст,
-        // вместо того чтобы показать пользователю сырые фигурные скобки и кавычки.
+        // практике, причём иногда ещё и в code fence (```json ... ```) поверх
+        // самого JSON. Сначала снимаем fence (если есть), потом проверяем —
+        // без этого reply вида "```\n{...}\n```" не начинается с "{" и вся
+        // проверка ниже молча пропускалась, показывая пользователю сырой JSON.
         String trimmed = reply.trim();
-        if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
+        String trimmedNoFence = trimmed.replaceAll("^`{1,3}(json)?\\s*", "").replaceAll("\\s*`{1,3}$", "").trim();
+        if (trimmedNoFence.startsWith("{") && trimmedNoFence.endsWith("}")) {
             try {
-                JsonNode leaked = mapper.readTree(trimmed);
+                JsonNode leaked = mapper.readTree(trimmedNoFence);
                 for (String field : new String[]{"message", "content", "text", "answer"}) {
                     if (leaked.has(field) && leaked.get(field).isTextual()) {
                         ObjectNode wrapped = mapper.createObjectNode();

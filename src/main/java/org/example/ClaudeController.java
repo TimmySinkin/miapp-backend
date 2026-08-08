@@ -4,6 +4,11 @@ import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 import java.util.Locale;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.CancellationException;
 
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
@@ -16,6 +21,7 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.client.RestTemplate;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -165,6 +171,26 @@ public class ClaudeController {
         HttpHeaders headers();
         RestTemplate restTemplate();
     }
+
+    // Коллбэк прогресса для стримингового эндпоинта /chat/stream — НЕ настоящий
+    // токен-в-токен стриминг (см. комментарий у chatStream ниже почему), а
+    // реальные (не по таймеру-угадайке) чекпоинты: "модель решила вызвать
+    // web_search" и "клиент отключился, можно прекращать". Обычный /chat
+    // передаёт NOOP — не публикует статусы и никогда не считается отменённым.
+    private interface StreamProgress {
+        void onSearching();
+        boolean isCancelled();
+        StreamProgress NOOP = new StreamProgress() {
+            public void onSearching() {}
+            public boolean isCancelled() { return false; }
+        };
+    }
+
+    // Общий пул потоков под фоновую обработку /chat/stream — SseEmitter
+    // обязан вернуться из controller-метода немедленно, реальная работа (в
+    // т.ч. блокирующие HTTP-вызовы к Yandex/Groq) идёт в отдельном потоке,
+    // не в потоке Tomcat, обрабатывающем сам HTTP-запрос.
+    private final ExecutorService streamExecutor = Executors.newCachedThreadPool();
 
     private final AiClient yandexClient = new AiClient() {
         public String name() { return "yandex"; }
@@ -613,6 +639,17 @@ public class ClaudeController {
         String historyText,
         boolean withTools
     ) throws Exception {
+        return callOllamaChatWithTools(client, systemPrompt, userMessage, historyText, withTools, StreamProgress.NOOP);
+    }
+
+    private String callOllamaChatWithTools(
+        AiClient client,
+        String systemPrompt,
+        String userMessage,
+        String historyText,
+        boolean withTools,
+        StreamProgress progress
+    ) throws Exception {
         String dateContext = getCurrentDateContext();
         StringBuilder sysContent = new StringBuilder();
         sysContent.append(systemPrompt).append("\n\n").append(dateContext);
@@ -640,6 +677,15 @@ public class ClaudeController {
 
         int maxIterations = 4; // защита от зацикливания, если модель бесконечно зовёт инструмент
         for (int iter = 0; iter < maxIterations; iter++) {
+            // Проверяем отмену ПЕРЕД каждым новым круглом обращением к провайдеру —
+            // если пользователь нажал "Стоп" между итерациями (например, модель
+            // уже получила результаты поиска и собирается сделать финальный
+            // вызов), не тратим ещё один запрос впустую. Внутри УЖЕ начатого
+            // блокирующего HTTP-вызова эта проверка не поможет — для него
+            // отмена работает отдельно, через прерывание потока (см. chatStream).
+            if (progress.isCancelled()) {
+                throw new CancellationException("Отменено пользователем между итерациями tool-calling");
+            }
             ObjectNode body = mapper.createObjectNode();
             body.put("model", client.modelId());
             body.put("stream", false);
@@ -676,6 +722,9 @@ public class ClaudeController {
 
             if (toolCalls != null && toolCalls.isArray() && toolCalls.size() > 0) {
                 System.out.println("[" + client.name() + "] модель запросила " + toolCalls.size() + " вызов(ов) инструмента(ов), итерация " + iter);
+                // Реальный (не по таймеру) сигнал для фронта: модель ТОЧНО
+                // вызывает инструмент прямо сейчас, а не "может быть, ждём долго".
+                progress.onSearching();
                 // Модель попросила вызвать инструмент(ы) — добавляем её сообщение
                 // с tool_calls в историю и выполняем каждый вызов реально.
                 ObjectNode assistantMsg = mapper.createObjectNode();
@@ -746,12 +795,20 @@ public class ClaudeController {
     private String chatWithFailover(
         String systemPrompt, String userMessage, String historyText, boolean withTools
     ) throws Exception {
+        return chatWithFailover(systemPrompt, userMessage, historyText, withTools, StreamProgress.NOOP);
+    }
+
+    private String chatWithFailover(
+        String systemPrompt, String userMessage, String historyText, boolean withTools, StreamProgress progress
+    ) throws Exception {
         boolean breakerOpen = System.currentTimeMillis() < yandexRetryAfterMs;
         if (!breakerOpen) {
             try {
-                String result = callOllamaChatWithTools(yandexClient, systemPrompt, userMessage, historyText, withTools);
+                String result = callOllamaChatWithTools(yandexClient, systemPrompt, userMessage, historyText, withTools, progress);
                 yandexFailStreak.set(0);
                 return result;
+            } catch (CancellationException ce) {
+                throw ce; // отмену пользователем прокидываем как есть, это не сбой Yandex
             } catch (Exception e) {
                 int streak = yandexFailStreak.incrementAndGet();
                 System.err.println("Yandex вызов #" + streak + " подряд неудачен: " + e.getMessage());
@@ -762,7 +819,7 @@ public class ClaudeController {
                 // сразу пробуем Groq в этом же запросе, не заставляя пользователя ждать ретрая
             }
         }
-        return callOllamaChatWithTools(groqClient, systemPrompt, userMessage, historyText, withTools);
+        return callOllamaChatWithTools(groqClient, systemPrompt, userMessage, historyText, withTools, progress);
     }
 
     // Сценарий 2 — ensemble ("черновик + рецензия"): Yandex быстро генерирует
@@ -772,7 +829,16 @@ public class ClaudeController {
     private String chatWithEnsemble(
         String systemPrompt, String userMessage, String historyText, boolean withTools
     ) throws Exception {
-        String draft = callOllamaChatWithTools(yandexClient, systemPrompt, userMessage, historyText, withTools);
+        return chatWithEnsemble(systemPrompt, userMessage, historyText, withTools, StreamProgress.NOOP);
+    }
+
+    private String chatWithEnsemble(
+        String systemPrompt, String userMessage, String historyText, boolean withTools, StreamProgress progress
+    ) throws Exception {
+        String draft = callOllamaChatWithTools(yandexClient, systemPrompt, userMessage, historyText, withTools, progress);
+        if (progress.isCancelled()) {
+            throw new CancellationException("Отменено пользователем перед рецензией Groq");
+        }
         try {
             String reviewPrompt =
                 "Ниже вопрос пользователя и черновик ответа от другой модели. Проверь черновик на " +
@@ -780,7 +846,7 @@ public class ClaudeController {
                 "лишь слегка улучшив формулировки. Если нашёл ошибку — исправь именно её, не переписывая " +
                 "всё заново и не меняя структуру/объём без необходимости.\n\n" +
                 "Вопрос пользователя: " + userMessage + "\n\nЧерновик ответа:\n" + draft;
-            return callOllamaChatWithTools(groqClient, systemPrompt, reviewPrompt, null, false);
+            return callOllamaChatWithTools(groqClient, systemPrompt, reviewPrompt, null, false, progress);
         } catch (Exception e) {
             System.err.println("Groq-рецензия недоступна (" + e.getMessage() + "), отдаём черновик от Yandex как есть");
             return draft;
@@ -819,120 +885,133 @@ public class ClaudeController {
         }
     }
 
+    // Вся логика построения "сырого" ответа модели (сборка system-промпта,
+    // topicLock, выбор vision/файлового/обычного сценария, ретрай при битом
+    // CLARIFY) — вынесена из chat() сюда, чтобы её могли использовать И
+    // обычный блокирующий /chat, И потоковый /chat/stream, не дублируя код.
+    // progress — StreamProgress.NOOP для обычного /chat (не публикует статусы,
+    // никогда не считается отменённым); реальный прогресс приходит только из
+    // chatStream().
+    private String resolveReply(ChatRequest request, StreamProgress progress) throws Exception {
+        StringBuilder userMessage = new StringBuilder(
+            request.getMessage() == null ? "" : request.getMessage()
+        );
+        java.util.List<String> images = new java.util.ArrayList<>();
+        boolean hasTextAttachment = false;
+
+        if (request.getAttachments() != null) {
+            for (Attachment att : request.getAttachments()) {
+                if ("text".equals(att.getType())) {
+                    hasTextAttachment = true;
+                    userMessage.append("\n\n[Прикреплённый файл \"")
+                        .append(att.getName())
+                        .append("\"]:\n")
+                        .append(att.getContent());
+                } else if ("image".equals(att.getType())) {
+                    images.add(att.getContent());
+                }
+            }
+        }
+
+        String languageRule = buildLanguageRule(request.getLang());
+        String historyText = buildHistoryTranscript(request.getHistory());
+        boolean hasImages = !images.isEmpty();
+
+        // Если у чата уже есть заявленная цель (goalText — самое первое
+        // сообщение, с которого создан чат) — жёстко ограничиваем разговор
+        // этой темой. Без этого пользователь может в чате про монтаж видео
+        // между делом обсудить план по похудению, и это создаёт путаницу
+        // при сохранении в календарь (см. handleSaveToCalendar) и вообще
+        // размывает смысл "один чат — одна цель".
+        String topicLock = "";
+        if (request.getGoalText() != null && !request.getGoalText().isBlank()) {
+            topicLock = "\n\nЭТОТ ЧАТ ЖЁСТКО ОГРАНИЧЕН ОДНОЙ ТЕМОЙ — заявленной целью: \"" +
+                request.getGoalText() + "\".\n" +
+                "Разрешено: обсуждать прогресс по этой цели, корректировать план, отвечать на вопросы, " +
+                "напрямую относящиеся к ней (детали упражнений, техник, материалов и т.п. в рамках именно этой темы).\n" +
+                "ЗАПРЕЩЕНО: обсуждать другую, не связанную цель или тему (например, если цель чата — " +
+                "\"научиться монтажу\", не помогай в этом же чате с планом похудения, рекомендациями " +
+                "фильмов и т.п.). Если пользователь просит что-то явно постороннее — вежливо откажи " +
+                "и предложи открыть для этого новый чат, не пытайся встроить постороннюю тему в текущий план.";
+        }
+
+        // ДЕТЕРМИНИРОВАННЫЙ запрет повторного раунда уточнений — не полагаемся
+        // на то, что модель сама сосчитает, сколько раз уже спрашивала (на
+        // практике она путается и может уточнять 3-4 раза подряд). Фронт
+        // явно сообщает, был ли в этом чате уже clarify-раунд.
+        if (request.isClarifyUsed()) {
+            topicLock += "\n\nУТОЧНЯЮЩИЙ РАУНД УЖЕ БЫЛ ИСПОЛЬЗОВАН В ЭТОМ ЧАТЕ. " +
+                "Категорически ЗАПРЕЩЕНО использовать блок <<<CLARIFY>>> ещё раз или задавать " +
+                "любые новые уточняющие вопросы, даже если кажется, что не хватает деталей. " +
+                "Дай финальную рекомендацию ПРЯМО СЕЙЧАС, используя всё, что уже известно из " +
+                "истории переписки — при нехватке деталей просто выбери разумный вариант по умолчанию.";
+        }
+
+        String reply;
+        String systemPromptUsed;
+        if (hasImages) {
+            // Vision-запросы остаются на старом простом /api/generate —
+            // qwen2.5vl не даёт надёжного tool calling, а картинка+интернет-поиск
+            // одновременно почти никогда не нужны в этом приложении. progress
+            // здесь не участвует — у vision нет ни tool-calling, ни поиска.
+            systemPromptUsed = CHAT_SYSTEM_PROMPT.replace("%LANGUAGE_RULE%", languageRule) + topicLock;
+            reply = callOllama(systemPromptUsed, userMessage.toString(), 0.7, images, languageRule, historyText);
+        } else if (hasTextAttachment) {
+            // Файловый сценарий: фокус на содержимом вложения, инструмент
+            // web_search тут не нужен и мог бы отвлекать модель от файла.
+            systemPromptUsed = FILE_SYSTEM_PROMPT.replace("%LANGUAGE_RULE%", languageRule) + topicLock;
+            reply = chatWithFailover(systemPromptUsed, userMessage.toString(), historyText, false, progress);
+        } else {
+            // Обычный текстовый сценарий (включая "фильмы") — с инструментом
+            // web_search. Модель САМА решает, вызывать его или нет,
+            // ориентируясь на описание инструмента и системный промпт,
+            // а не по жёсткому списку ключевых слов в Java-коде.
+            systemPromptUsed = CHAT_SYSTEM_PROMPT.replace("%LANGUAGE_RULE%", languageRule) + topicLock;
+            // ensembleMode — новое опциональное поле в ChatRequest (Boolean/boolean,
+            // default false); фронт включает его отдельным тумблером "Точный режим",
+            // т.к. это удваивает время ответа. Пока поле не добавлено на фронте/DTO,
+            // request.isEnsembleMode() всегда вернёт false и поведение не меняется.
+            reply = request.isEnsembleMode()
+                ? chatWithEnsemble(systemPromptUsed, userMessage.toString(), historyText, true, progress)
+                : chatWithFailover(systemPromptUsed, userMessage.toString(), historyText, true, progress);
+        }
+
+        // Модель иногда (реально наблюдалось — YandexGPT и локальная Ollama
+        // обе) кладёт в блок <<<CLARIFY>>> синтаксически битый или пустой
+        // JSON (пропущенная запятая/скобка, пустой questions). Без ретрая
+        // пользователь получал вводную фразу без единого вопроса и без
+        // кнопок — молчаливый откат на wrapChatReply это скрывал, выглядело
+        // как "ничего не произошло". Делаем ОДИН ретрай с явным указанием
+        // модели на конкретную её ошибку, прежде чем сдаваться.
+        if (isMalformedClarifyBlock(reply)) {
+            System.err.println("[chat] обнаружен битый/пустой CLARIFY-блок, делаем один ретрай с корректировкой");
+            try {
+                String correctionNote = "\n\n[СИСТЕМНОЕ ПРИМЕЧАНИЕ ДЛЯ ТЕБЯ: твой предыдущий ответ на это же " +
+                    "сообщение содержал СИНТАКСИЧЕСКИ НЕКОРРЕКТНЫЙ или ПУСТОЙ JSON внутри блока " +
+                    "<<<CLARIFY>>>...<<<END>>> (например, пропущена запятая, скобка, или questions оказался " +
+                    "пустым массивом). Ответь СНОВА на исходное сообщение пользователя тем же по смыслу " +
+                    "уточняющим вопросом(ами), но верни СТРОГО валидный JSON без единой синтаксической ошибки. " +
+                    "Если не уверен, что сможешь собрать валидный JSON — просто пропусти уточнение и сразу " +
+                    "дай финальный содержательный ответ по существу, без блока CLARIFY вообще.]";
+                String retryMessage = userMessage.toString() + correctionNote;
+                reply = hasImages
+                    ? callOllama(systemPromptUsed, retryMessage, 0.7, images, languageRule, historyText)
+                    : (request.isEnsembleMode()
+                        ? chatWithEnsemble(systemPromptUsed, retryMessage, historyText, !hasTextAttachment, progress)
+                        : chatWithFailover(systemPromptUsed, retryMessage, historyText, !hasTextAttachment, progress));
+            } catch (Exception retryEx) {
+                System.err.println("[chat] ретрай тоже не удался: " + retryEx.getMessage());
+                // reply остаётся прежним (битым) — wrapChatReply сделает безопасный откат как раньше
+            }
+        }
+
+        return reply;
+    }
+
     @PostMapping("/chat")
     public ResponseEntity<String> chat(@RequestBody ChatRequest request) {
         try {
-            StringBuilder userMessage = new StringBuilder(
-                request.getMessage() == null ? "" : request.getMessage()
-            );
-            java.util.List<String> images = new java.util.ArrayList<>();
-            boolean hasTextAttachment = false;
-
-            if (request.getAttachments() != null) {
-                for (Attachment att : request.getAttachments()) {
-                    if ("text".equals(att.getType())) {
-                        hasTextAttachment = true;
-                        userMessage.append("\n\n[Прикреплённый файл \"")
-                            .append(att.getName())
-                            .append("\"]:\n")
-                            .append(att.getContent());
-                    } else if ("image".equals(att.getType())) {
-                        images.add(att.getContent());
-                    }
-                }
-            }
-
-            String languageRule = buildLanguageRule(request.getLang());
-            String historyText = buildHistoryTranscript(request.getHistory());
-            boolean hasImages = !images.isEmpty();
-
-            // Если у чата уже есть заявленная цель (goalText — самое первое
-            // сообщение, с которого создан чат) — жёстко ограничиваем разговор
-            // этой темой. Без этого пользователь может в чате про монтаж видео
-            // между делом обсудить план по похудению, и это создаёт путаницу
-            // при сохранении в календарь (см. handleSaveToCalendar) и вообще
-            // размывает смысл "один чат — одна цель".
-            String topicLock = "";
-            if (request.getGoalText() != null && !request.getGoalText().isBlank()) {
-                topicLock = "\n\nЭТОТ ЧАТ ЖЁСТКО ОГРАНИЧЕН ОДНОЙ ТЕМОЙ — заявленной целью: \"" +
-                    request.getGoalText() + "\".\n" +
-                    "Разрешено: обсуждать прогресс по этой цели, корректировать план, отвечать на вопросы, " +
-                    "напрямую относящиеся к ней (детали упражнений, техник, материалов и т.п. в рамках именно этой темы).\n" +
-                    "ЗАПРЕЩЕНО: обсуждать другую, не связанную цель или тему (например, если цель чата — " +
-                    "\"научиться монтажу\", не помогай в этом же чате с планом похудения, рекомендациями " +
-                    "фильмов и т.п.). Если пользователь просит что-то явно постороннее — вежливо откажи " +
-                    "и предложи открыть для этого новый чат, не пытайся встроить постороннюю тему в текущий план.";
-            }
-
-            // ДЕТЕРМИНИРОВАННЫЙ запрет повторного раунда уточнений — не полагаемся
-            // на то, что модель сама сосчитает, сколько раз уже спрашивала (на
-            // практике она путается и может уточнять 3-4 раза подряд). Фронт
-            // явно сообщает, был ли в этом чате уже clarify-раунд.
-            if (request.isClarifyUsed()) {
-                topicLock += "\n\nУТОЧНЯЮЩИЙ РАУНД УЖЕ БЫЛ ИСПОЛЬЗОВАН В ЭТОМ ЧАТЕ. " +
-                    "Категорически ЗАПРЕЩЕНО использовать блок <<<CLARIFY>>> ещё раз или задавать " +
-                    "любые новые уточняющие вопросы, даже если кажется, что не хватает деталей. " +
-                    "Дай финальную рекомендацию ПРЯМО СЕЙЧАС, используя всё, что уже известно из " +
-                    "истории переписки — при нехватке деталей просто выбери разумный вариант по умолчанию.";
-            }
-
-            String reply;
-            String systemPromptUsed;
-            if (hasImages) {
-                // Vision-запросы остаются на старом простом /api/generate —
-                // qwen2.5vl не даёт надёжного tool calling, а картинка+интернет-поиск
-                // одновременно почти никогда не нужны в этом приложении.
-                systemPromptUsed = CHAT_SYSTEM_PROMPT.replace("%LANGUAGE_RULE%", languageRule) + topicLock;
-                reply = callOllama(systemPromptUsed, userMessage.toString(), 0.7, images, languageRule, historyText);
-            } else if (hasTextAttachment) {
-                // Файловый сценарий: фокус на содержимом вложения, инструмент
-                // web_search тут не нужен и мог бы отвлекать модель от файла.
-                systemPromptUsed = FILE_SYSTEM_PROMPT.replace("%LANGUAGE_RULE%", languageRule) + topicLock;
-                reply = chatWithFailover(systemPromptUsed, userMessage.toString(), historyText, false);
-            } else {
-                // Обычный текстовый сценарий (включая "фильмы") — с инструментом
-                // web_search. Модель САМА решает, вызывать его или нет,
-                // ориентируясь на описание инструмента и системный промпт,
-                // а не по жёсткому списку ключевых слов в Java-коде.
-                systemPromptUsed = CHAT_SYSTEM_PROMPT.replace("%LANGUAGE_RULE%", languageRule) + topicLock;
-                // ensembleMode — новое опциональное поле в ChatRequest (Boolean/boolean,
-                // default false); фронт включает его отдельным тумблером "Точный режим",
-                // т.к. это удваивает время ответа. Пока поле не добавлено на фронте/DTO,
-                // request.isEnsembleMode() всегда вернёт false и поведение не меняется.
-                reply = request.isEnsembleMode()
-                    ? chatWithEnsemble(systemPromptUsed, userMessage.toString(), historyText, true)
-                    : chatWithFailover(systemPromptUsed, userMessage.toString(), historyText, true);
-            }
-
-            // Модель иногда (реально наблюдалось — YandexGPT и локальная Ollama
-            // обе) кладёт в блок <<<CLARIFY>>> синтаксически битый или пустой
-            // JSON (пропущенная запятая/скобка, пустой questions). Без ретрая
-            // пользователь получал вводную фразу без единого вопроса и без
-            // кнопок — молчаливый откат на wrapChatReply это скрывал, выглядело
-            // как "ничего не произошло". Делаем ОДИН ретрай с явным указанием
-            // модели на конкретную её ошибку, прежде чем сдаваться.
-            if (isMalformedClarifyBlock(reply)) {
-                System.err.println("[chat] обнаружен битый/пустой CLARIFY-блок, делаем один ретрай с корректировкой");
-                try {
-                    String correctionNote = "\n\n[СИСТЕМНОЕ ПРИМЕЧАНИЕ ДЛЯ ТЕБЯ: твой предыдущий ответ на это же " +
-                        "сообщение содержал СИНТАКСИЧЕСКИ НЕКОРРЕКТНЫЙ или ПУСТОЙ JSON внутри блока " +
-                        "<<<CLARIFY>>>...<<<END>>> (например, пропущена запятая, скобка, или questions оказался " +
-                        "пустым массивом). Ответь СНОВА на исходное сообщение пользователя тем же по смыслу " +
-                        "уточняющим вопросом(ами), но верни СТРОГО валидный JSON без единой синтаксической ошибки. " +
-                        "Если не уверен, что сможешь собрать валидный JSON — просто пропусти уточнение и сразу " +
-                        "дай финальный содержательный ответ по существу, без блока CLARIFY вообще.]";
-                    String retryMessage = userMessage.toString() + correctionNote;
-                    reply = hasImages
-                        ? callOllama(systemPromptUsed, retryMessage, 0.7, images, languageRule, historyText)
-                        : (request.isEnsembleMode()
-                            ? chatWithEnsemble(systemPromptUsed, retryMessage, historyText, !hasTextAttachment)
-                            : chatWithFailover(systemPromptUsed, retryMessage, historyText, !hasTextAttachment));
-                } catch (Exception retryEx) {
-                    System.err.println("[chat] ретрай тоже не удался: " + retryEx.getMessage());
-                    // reply остаётся прежним (битым) — wrapChatReply сделает безопасный откат как раньше
-                }
-            }
-
+            String reply = resolveReply(request, StreamProgress.NOOP);
             return ResponseEntity.ok(wrapChatReply(reply));
         } catch (Exception e) {
             // Раньше исключение просто проглатывалось — в консоли бэкенда было
@@ -941,6 +1020,87 @@ public class ClaudeController {
             // в теле ответа, который фронт вдобавок не всегда показывает.
             e.printStackTrace();
             return ResponseEntity.status(500).body("Ошибка: " + e.getMessage());
+        }
+    }
+
+    // Потоковый вариант /chat — НЕ токен-в-токен стриминг (модель отвечает
+    // тем же способом, что и раньше, единым блокирующим HTTP-вызовом на
+    // каждую итерацию tool-calling — см. callOllamaChatWithTools). Переписывать
+    // разбор построчного/чанкового формата трёх разных провайдеров (Groq,
+    // YandexGPT, Ollama — у каждого свой протокол стриминга) — отдельная и
+    // гораздо более рискованная задача, которую нельзя было бы проверить без
+    // доступа к живым API этих провайдеров.
+    //
+    // Что этот эндпоинт реально даёт:
+    // 1) Событие "searching" — НАСТОЯЩИЙ сигнал (не таймер-угадайка), шлётся
+    //    в момент, когда модель ДЕЙСТВИТЕЛЬНО решила вызвать web_search
+    //    (см. progress.onSearching() в callOllamaChatWithTools).
+    // 2) Реальная отмена по кнопке "Стоп": когда фронт обрывает fetch,
+    //    SseEmitter получает onError/onTimeout/onCompletion, мы интерпретируем
+    //    это как отмену и (а) не делаем следующую итерацию tool-calling между
+    //    вызовами провайдера, и (б) прерываем ("cancel(true)") поток задачи —
+    //    для Groq (Apache HttpClient5, "классический" I/O задокументированно
+    //    прерываемый) это реально обрывает УЖЕ ИДУЩИЙ блокирующий вызов, а не
+    //    только останавливает будущие. Для Yandex (RestTemplate поверх
+    //    HttpURLConnection) прерывание потока НЕ гарантированно обрывает уже
+    //    начатое чтение сокета — это известное ограничение java.net.HttpURLConnection,
+    //    не что-то забытое: между итерациями отмена сработает всегда, а вот
+    //    посреди ОДНОГО отдельного вызова к Yandex — best-effort.
+    @PostMapping(value = "/chat/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public SseEmitter chatStream(@RequestBody ChatRequest request) {
+        SseEmitter emitter = new SseEmitter(5 * 60 * 1000L); // 5 минут — с запасом на медленные ответы
+        AtomicBoolean cancelled = new AtomicBoolean(false);
+
+        StreamProgress progress = new StreamProgress() {
+            public void onSearching() { emitSafely(emitter, "status", "searching"); }
+            public boolean isCancelled() { return cancelled.get(); }
+        };
+
+        Future<?> task = streamExecutor.submit(() -> {
+            try {
+                emitSafely(emitter, "status", "thinking");
+                String reply = resolveReply(request, progress);
+                if (cancelled.get()) return; // клиент уже отключился — не тратим силы на финальную сборку/отправку
+                String finalJson = wrapChatReply(reply);
+                emitSafely(emitter, "done", finalJson);
+                emitter.complete();
+            } catch (CancellationException ce) {
+                // Наша собственная отмена (progress.isCancelled() сработал между
+                // итерациями) — не настоящая ошибка, просто тихо завершаемся.
+                try { emitter.complete(); } catch (Exception ignored) {}
+            } catch (InterruptedException | java.io.InterruptedIOException ie) {
+                // Поток прерван через task.cancel(true) (см. onError/onTimeout
+                // ниже) — тоже ожидаемая отмена, не логируем как ошибку.
+                try { emitter.complete(); } catch (Exception ignored) {}
+            } catch (Exception e) {
+                if (!cancelled.get()) {
+                    System.err.println("[chat/stream] ошибка: " + e.getMessage());
+                    e.printStackTrace();
+                    emitSafely(emitter, "error", "Не удалось получить ответ: " + e.getMessage());
+                }
+                try { emitter.complete(); } catch (Exception ignored) {}
+            }
+        });
+
+        Runnable onDisconnect = () -> {
+            cancelled.set(true);
+            // interrupt настоящего выполняющегося потока — см. комментарий выше
+            // про то, для какого провайдера это реально прерывает in-flight вызов.
+            task.cancel(true);
+        };
+        emitter.onCompletion(() -> cancelled.set(true)); // штатное завершение — просто фиксируем флаг, поток НЕ прерываем
+        emitter.onTimeout(onDisconnect);
+        emitter.onError((ex) -> onDisconnect.run());
+
+        return emitter;
+    }
+
+    private void emitSafely(SseEmitter emitter, String eventName, String data) {
+        try {
+            emitter.send(SseEmitter.event().name(eventName).data(data, MediaType.TEXT_PLAIN));
+        } catch (Exception ignored) {
+            // Клиент уже отключился к моменту отправки — не страшно, это
+            // штатная гонка (мы могли не успеть узнать об отключении раньше).
         }
     }
 
